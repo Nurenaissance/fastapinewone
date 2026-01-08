@@ -1,0 +1,54 @@
+name: Deploy FastAPI to Azure Web App
+
+on:
+  push:
+    branches:
+      - new-world
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload source code for deployment
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-source
+          path: |
+            .
+            !venv/
+            !.git/
+            !__pycache__/
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: 'Production'
+
+    permissions:
+      id-token: write      # REQUIRED for Azure OIDC login
+      contents: read       # Required to download artifacts
+
+    steps:
+      - name: Download app source
+        uses: actions/download-artifact@v4
+        with:
+          name: app-source
+
+      - name: Login to Azure via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_95067DE1882C4FC5971E1802AD9F3C1C }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_2B87755C79B64B12954D7F23F3251303 }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_7FDB4C52E45E4462826E3F37C372AD60 }}
+
+      - name: Deploy to Azure Web App (Oryx will install Python dependencies automatically)
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: 'fastapione'
+          slot-name: 'Production'
+          package: .
