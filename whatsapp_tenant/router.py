@@ -504,17 +504,24 @@ async def create_group_logic(request: BroadcastGroupCreate, db, x_tenant_id):
     try:
         members = [member.dict() for member in request.members]
         group_id = request.id or str(uuid4())
-        
+
         new_group = BroadcastGroups(
             id=group_id,
             name=request.name,
             members=members,
-            tenant_id=x_tenant_id
+            tenant_id=x_tenant_id,
+            auto_rules=request.auto_rules
         )
 
         db.add(new_group)
         db.commit()
         db.refresh(new_group)
+
+        # If auto_rules are enabled, sync members automatically
+        if request.auto_rules and request.auto_rules.get('enabled'):
+            logger.info(f"Auto-rules enabled for group {group_id}, syncing members...")
+            sync_result = GroupService.sync_group_members(new_group, db)
+            logger.info(f"Smart group created with {sync_result.get('members_after', 0)} members")
 
         # Clear group cache
         with cache_lock:
@@ -523,7 +530,7 @@ async def create_group_logic(request: BroadcastGroupCreate, db, x_tenant_id):
                 del custom_cache[group_cache_key]
 
         return new_group
-    
+
     except Exception as e:
         db.rollback()
         logger.error(f"Error creating group: {str(e)}")
@@ -536,11 +543,13 @@ async def create_group(request: BroadcastGroupCreate, db: orm.Session = Depends(
             raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
             
         new_group = await create_group_logic(request, db, x_tenant_id)
+        # Refresh to get updated members after sync
+        db.refresh(new_group)
         return BroadcastGroupResponse(
             id=new_group.id,
             name=new_group.name,
             members=new_group.members,
-            tenant_id=x_tenant_id
+            auto_rules=new_group.auto_rules
         )
 
     except HTTPException:

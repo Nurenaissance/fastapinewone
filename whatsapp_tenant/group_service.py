@@ -41,8 +41,7 @@ class GroupService:
         )
 
         # Filter out contacts with manual_mode enabled
-        # TODO: Uncomment when manual_mode column is added to database
-        # matching_contacts = [c for c in matching_contacts if not c.manual_mode]
+        matching_contacts = [c for c in matching_contacts if not c.manual_mode]
 
         # Build new members list
         new_members = [
@@ -85,10 +84,9 @@ class GroupService:
             List of group IDs the contact was added to
         """
         # Skip if contact has manual mode enabled
-        # TODO: Uncomment when manual_mode column is added to database
-        # if contact.manual_mode:
-        #     logger.info(f"Contact {contact.phone} has manual_mode enabled, skipping auto-assignment")
-        #     return []
+        if contact.manual_mode:
+            logger.info(f"Contact {contact.phone} has manual_mode enabled, skipping auto-assignment")
+            return []
 
         # Get all groups with auto-rules for this tenant
         groups_with_rules = db.query(BroadcastGroups).filter(
