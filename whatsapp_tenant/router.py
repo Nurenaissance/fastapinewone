@@ -987,7 +987,28 @@ async def test_rules(
         if not tenant_id:
             raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
 
+        # Temporarily enable DEBUG logging for this request
+        original_level = logger.level
+        logger.setLevel(logging.DEBUG)
+
+        logger.info(f"Testing rules for tenant_id: {tenant_id}")
         rules_dict = payload.rules.dict()
+        logger.info(f"Rules dict: {rules_dict}")
+
+        # Get total contact count for diagnostics
+        total_contacts = db.query(Contact).filter(
+            Contact.tenant_id == tenant_id
+        ).count()
+        logger.info(f"Total contacts for tenant {tenant_id}: {total_contacts}")
+
+        # Get sample contacts to verify data
+        sample_contacts = db.query(Contact).filter(
+            Contact.tenant_id == tenant_id
+        ).limit(5).all()
+
+        logger.info(f"Sample contacts:")
+        for c in sample_contacts:
+            logger.info(f"  ID: {c.id}, Phone: {c.phone}, CreatedOn: {c.createdOn}, Tenant: {c.tenant_id}")
 
         # If specific contact provided, test against it
         if payload.sample_contact_id:
@@ -1000,6 +1021,9 @@ async def test_rules(
                 raise HTTPException(status_code=404, detail="Contact not found")
 
             matches = RuleEvaluator.evaluate_contact(contact, rules_dict)
+
+            # Restore logging level
+            logger.setLevel(original_level)
 
             return {
                 "test_mode": "single_contact",
@@ -1014,8 +1038,12 @@ async def test_rules(
             db, tenant_id, rules_dict
         )
 
+        # Restore logging level
+        logger.setLevel(original_level)
+
         return {
             "test_mode": "all_contacts",
+            "total_contacts": total_contacts,
             "total_matches": len(matching_contacts),
             "sample_matches": [
                 {
@@ -1031,7 +1059,7 @@ async def test_rules(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error testing rules: {str(e)}")
+        logger.error(f"Error testing rules: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error testing rules: {str(e)}")
 
 

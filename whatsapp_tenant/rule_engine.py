@@ -50,14 +50,19 @@ class RuleEvaluator:
             # Get actual value from contact
             actual_value = RuleEvaluator._get_contact_field_value(contact, field, condition_type)
 
+            logger.debug(f"Evaluating contact {contact.id}: field={field}, actual={actual_value}, operator={operator}, expected={expected_value}")
+
             # Handle None values
             if actual_value is None:
+                logger.debug(f"Contact {contact.id}: field {field} is None, returning False")
                 return operator in ['not_equals']  # Only not_equals can match None
 
             # Apply operator
-            return RuleEvaluator._apply_operator(actual_value, operator, expected_value, condition_type)
+            result = RuleEvaluator._apply_operator(actual_value, operator, expected_value, condition_type)
+            logger.debug(f"Contact {contact.id}: condition result = {result}")
+            return result
         except Exception as e:
-            logger.warning(f"Condition evaluation failed: {condition} - {e}")
+            logger.warning(f"Condition evaluation failed for contact {contact.id}: {condition} - {e}")
             return False
 
     @staticmethod
@@ -108,16 +113,26 @@ class RuleEvaluator:
             # Date/Numeric operators
             elif operator == 'greater_than':
                 if condition_type in ['date', 'engagement']:
-                    actual_dt = RuleEvaluator._parse_datetime(actual)
-                    expected_dt = RuleEvaluator._parse_datetime(expected)
-                    return actual_dt > expected_dt
+                    try:
+                        actual_dt = RuleEvaluator._parse_datetime(actual)
+                        expected_dt = RuleEvaluator._parse_datetime(expected)
+                        logger.debug(f"Date comparison: {actual_dt} > {expected_dt} = {actual_dt > expected_dt}")
+                        return actual_dt > expected_dt
+                    except Exception as e:
+                        logger.error(f"Failed to parse datetime for greater_than: actual={actual}, expected={expected}, error={e}")
+                        return False
                 return float(actual) > float(expected)
 
             elif operator == 'less_than':
                 if condition_type in ['date', 'engagement']:
-                    actual_dt = RuleEvaluator._parse_datetime(actual)
-                    expected_dt = RuleEvaluator._parse_datetime(expected)
-                    return actual_dt < expected_dt
+                    try:
+                        actual_dt = RuleEvaluator._parse_datetime(actual)
+                        expected_dt = RuleEvaluator._parse_datetime(expected)
+                        logger.debug(f"Date comparison: {actual_dt} < {expected_dt} = {actual_dt < expected_dt}")
+                        return actual_dt < expected_dt
+                    except Exception as e:
+                        logger.error(f"Failed to parse datetime for less_than: actual={actual}, expected={expected}, error={e}")
+                        return False
                 return float(actual) < float(expected)
 
             elif operator == 'in_range':
@@ -181,10 +196,22 @@ class RuleEvaluator:
         Returns:
             List of matching Contact objects
         """
+        logger.info(f"Fetching contacts for tenant_id={tenant_id}")
+        logger.info(f"Rules: {rules}")
+
         # Get all contacts for tenant
         all_contacts = db_session.query(Contact).filter(
             Contact.tenant_id == tenant_id
         ).all()
+
+        logger.info(f"Total contacts found: {len(all_contacts)}")
+
+        # Log sample of contacts with their createdOn values
+        if all_contacts:
+            sample_size = min(5, len(all_contacts))
+            logger.info(f"Sample contacts (first {sample_size}):")
+            for contact in all_contacts[:sample_size]:
+                logger.info(f"  Contact {contact.id}: phone={contact.phone}, createdOn={contact.createdOn}")
 
         # Filter using rule evaluation
         matching_contacts = [
@@ -192,4 +219,5 @@ class RuleEvaluator:
             if RuleEvaluator.evaluate_contact(contact, rules)
         ]
 
+        logger.info(f"Matching contacts: {len(matching_contacts)}")
         return matching_contacts

@@ -15,7 +15,7 @@ class Contact(Base):
     description = Column(Text, nullable=True)
     createdOn = Column(DateTime, default=datetime.utcnow, nullable=True)
     isActive = Column(Boolean, default=False, nullable=True)
-    tenant_id = Column(Integer, ForeignKey("tenant_tenant.id"), nullable=True)
+    tenant_id = Column(String(50), ForeignKey("tenant_tenant.id"), nullable=True)  # Fixed: Should be String, not Integer
     tenant = relationship("Tenant", back_populates="contacts")  # Corrected back_populates
     template_key = Column(String(50), nullable=True)
     last_seen = Column(DateTime, default=datetime.utcnow, nullable=True)
