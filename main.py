@@ -9,9 +9,16 @@ import broadcast_analytics.router
 import catalog.router
 import flowsAPI.router
 import logging
-import jwt
 import os
 from dotenv import load_dotenv
+try:
+    import jwt
+    from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
+except ImportError:
+    import jwt
+    # Fallback for wrong jwt library
+    ExpiredSignatureError = Exception
+    InvalidTokenError = Exception
 
 # Load environment variables from .env file
 load_dotenv()
@@ -139,12 +146,18 @@ async def jwt_middleware(request: Request, call_next):
 
         return await call_next(request)
 
-    except jwt.ExpiredSignatureError:
+    except ExpiredSignatureError:
         return JSONResponse(
             status_code=401,
             content={"error": "token_expired", "message": "Access token has expired"}
         )
-    except jwt.InvalidTokenError:
+    except InvalidTokenError:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "invalid_token", "message": "Invalid token"}
+        )
+    except Exception as e:
+        logger.error(f"JWT validation error: {str(e)}")
         return JSONResponse(
             status_code=401,
             content={"error": "invalid_token", "message": "Invalid token"}
