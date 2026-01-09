@@ -22,6 +22,7 @@ class Contact(Base):
     last_delivered = Column(DateTime, default=datetime.utcnow, nullable=True)
     last_replied = Column(DateTime, default=datetime.utcnow, nullable=True)
     customField = Column(JSON, nullable=True)
+    manual_mode = Column(Boolean, default=False, nullable=True)
 
     notifications = relationship("Notifications", back_populates="contact")
 

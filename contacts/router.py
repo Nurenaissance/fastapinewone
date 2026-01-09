@@ -3,6 +3,7 @@ from sqlalchemy import orm, or_, and_, text, nulls_first, nulls_last, func
 from config.database import get_db
 from .models import Contact
 from whatsapp_tenant.models import WhatsappTenantData
+from whatsapp_tenant.group_service import GroupService
 from typing import Optional
 from datetime import datetime, timedelta
 import math
@@ -290,14 +291,22 @@ async def create_contact(request: Request, db: orm.Session = Depends(get_db)):
             tenant_id=tenant_id,
             last_delivered=body.get('last_delivered'),
             last_seen=body.get('last_seen'),
-            last_replied=body.get('last_replied')
+            last_replied=body.get('last_replied'),
+            customField=body.get('customField'),
+            manual_mode=body.get('manual_mode', False)
         )
 
         db.add(new_contact)
         db.commit()
         db.refresh(new_contact)
 
-        return new_contact
+        # AUTO-ASSIGN TO GROUPS WITH MATCHING RULES
+        assigned_groups = GroupService.auto_assign_contact_to_groups(new_contact, db)
+
+        return {
+            "contact": new_contact,
+            "auto_assigned_groups": assigned_groups
+        }
 
     except HTTPException:
         raise
@@ -351,17 +360,77 @@ async def update_single_contact(
             contact.last_seen = body['last_seen']
         if 'last_replied' in body:
             contact.last_replied = body['last_replied']
+        if 'customField' in body:
+            contact.customField = body['customField']
+        if 'manual_mode' in body:
+            contact.manual_mode = body['manual_mode']
 
         db.commit()
         db.refresh(contact)
 
-        return contact
+        # RE-EVALUATE GROUP MEMBERSHIP AFTER UPDATE
+        assigned_groups = GroupService.auto_assign_contact_to_groups(contact, db)
+
+        return {
+            "contact": contact,
+            "auto_assigned_groups": assigned_groups
+        }
 
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error updating contact: {str(e)}")
+
+
+@router.patch("/contacts/{contact_id}/manual-mode")
+async def toggle_manual_mode(
+    contact_id: int,
+    request: Request,
+    db: orm.Session = Depends(get_db)
+):
+    """Toggle manual mode for a contact to disable/enable automation"""
+    tenant_id = request.headers.get("X-Tenant-Id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="Tenant ID missing in headers")
+
+    try:
+        body = await request.json()
+        manual_mode = body.get('manual_mode')
+
+        if manual_mode is None:
+            raise HTTPException(status_code=400, detail="manual_mode field is required")
+
+        # Find contact
+        contact = db.query(Contact).filter(
+            Contact.id == contact_id,
+            Contact.tenant_id == tenant_id
+        ).first()
+
+        if not contact:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Contact with ID {contact_id} not found for this tenant"
+            )
+
+        # Update manual mode
+        contact.manual_mode = manual_mode
+        db.commit()
+        db.refresh(contact)
+
+        return {
+            "contact_id": contact.id,
+            "phone": contact.phone,
+            "name": contact.name,
+            "manual_mode": contact.manual_mode,
+            "message": f"Manual mode {'enabled' if manual_mode else 'disabled'} for contact"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error toggling manual mode: {str(e)}")
 
 
 @router.get("/contact")

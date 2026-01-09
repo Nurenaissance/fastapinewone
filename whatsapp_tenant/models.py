@@ -74,7 +74,7 @@ class BroadcastGroups(Base):
     id = Column(String(50), primary_key=True)
     members = Column(JSON)
     tenant_id = Column(String(50), ForeignKey("tenant_tenant.id"), nullable=True)
-    
+    auto_rules = Column(JSON, nullable=True)
 
     tenant = relationship("Tenant", back_populates="broadcast_groups")
 

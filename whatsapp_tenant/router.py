@@ -6,8 +6,10 @@ from .models import WhatsappTenantData, MessageStatus, BroadcastGroups, MessageS
 from models import Tenant
 from product.models import Product
 from typing import Optional, List
-from .schema import BroadcastGroupResponse, BroadcastGroupCreate, PromptUpdateRequest, BroadcastGroupContactDelete, BroadcastGroupAddContacts, BroadcastGroupMember
+from .schema import BroadcastGroupResponse, BroadcastGroupCreate, PromptUpdateRequest, BroadcastGroupContactDelete, BroadcastGroupAddContacts, BroadcastGroupMember, BroadcastGroupUpdateRules, RuleTestRequest
 from .crud import create_broadcast_group, get_broadcast_group, get_all_broadcast_groups
+from .rule_engine import RuleEvaluator
+from .group_service import GroupService
 from contacts.models import Contact
 from datetime import timedelta
 import asyncio
@@ -859,6 +861,241 @@ async def upload_and_add_contacts(
         raise HTTPException(
             status_code=500, detail=f"Failed to process Excel file: {str(e)}"
         )
+
+# ===================================
+# AUTO-RULES ENDPOINTS FOR DYNAMIC GROUP MEMBERSHIP
+# ===================================
+
+@router.put("/broadcast-groups/{group_id}/rules")
+async def update_group_rules(
+    group_id: str,
+    payload: BroadcastGroupUpdateRules,
+    request: Request,
+    db: orm.Session = Depends(get_db)
+):
+    """Update auto-rules for a broadcast group and sync members"""
+    try:
+        tenant_id = request.headers.get("X-Tenant-Id")
+        if not tenant_id:
+            raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+        # Get group
+        group = db.query(BroadcastGroups).filter(
+            BroadcastGroups.id == group_id,
+            BroadcastGroups.tenant_id == tenant_id
+        ).first()
+
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        # Update rules
+        group.auto_rules = payload.auto_rules.dict()
+
+        # Sync members if rules are enabled
+        sync_result = GroupService.sync_group_members(group, db)
+
+        # Clear cache
+        with cache_lock:
+            cache_keys = [
+                f"groups:{tenant_id}",
+                f"group:{group_id}"
+            ]
+            for key in cache_keys:
+                if key in custom_cache:
+                    del custom_cache[key]
+
+        return {
+            "message": "Rules updated successfully",
+            "group_id": group_id,
+            "sync_result": sync_result
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error updating group rules: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error updating rules: {str(e)}")
+
+
+@router.post("/broadcast-groups/{group_id}/sync")
+async def sync_group_members(
+    group_id: str,
+    request: Request,
+    db: orm.Session = Depends(get_db)
+):
+    """Manually trigger synchronization of group members based on rules"""
+    try:
+        tenant_id = request.headers.get("X-Tenant-Id")
+        if not tenant_id:
+            raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+        # Get group
+        group = db.query(BroadcastGroups).filter(
+            BroadcastGroups.id == group_id,
+            BroadcastGroups.tenant_id == tenant_id
+        ).first()
+
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        # Sync members
+        sync_result = GroupService.sync_group_members(group, db)
+
+        # Clear cache
+        with cache_lock:
+            cache_keys = [
+                f"groups:{tenant_id}",
+                f"group:{group_id}"
+            ]
+            for key in cache_keys:
+                if key in custom_cache:
+                    del custom_cache[key]
+
+        return {
+            "message": "Group synchronized successfully",
+            "group_id": group_id,
+            "result": sync_result
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error syncing group: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error syncing group: {str(e)}")
+
+
+@router.post("/broadcast-groups/test-rules")
+async def test_rules(
+    payload: RuleTestRequest,
+    request: Request,
+    db: orm.Session = Depends(get_db)
+):
+    """Test auto-rules against contacts without saving"""
+    try:
+        tenant_id = request.headers.get("X-Tenant-Id")
+        if not tenant_id:
+            raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+        rules_dict = payload.rules.dict()
+
+        # If specific contact provided, test against it
+        if payload.sample_contact_id:
+            contact = db.query(Contact).filter(
+                Contact.id == payload.sample_contact_id,
+                Contact.tenant_id == tenant_id
+            ).first()
+
+            if not contact:
+                raise HTTPException(status_code=404, detail="Contact not found")
+
+            matches = RuleEvaluator.evaluate_contact(contact, rules_dict)
+
+            return {
+                "test_mode": "single_contact",
+                "contact_id": contact.id,
+                "contact_phone": contact.phone,
+                "contact_name": contact.name,
+                "matches": matches
+            }
+
+        # Otherwise, get all matching contacts
+        matching_contacts = RuleEvaluator.get_matching_contacts(
+            db, tenant_id, rules_dict
+        )
+
+        return {
+            "test_mode": "all_contacts",
+            "total_matches": len(matching_contacts),
+            "sample_matches": [
+                {
+                    "id": c.id,
+                    "name": c.name,
+                    "phone": c.phone,
+                    "createdOn": c.createdOn.isoformat() if c.createdOn else None
+                }
+                for c in matching_contacts[:10]  # First 10
+            ]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error testing rules: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error testing rules: {str(e)}")
+
+
+@router.delete("/broadcast-groups/{group_id}/rules")
+async def reset_group_rules(
+    group_id: str,
+    request: Request,
+    keep_members: bool = False,
+    db: orm.Session = Depends(get_db)
+):
+    """
+    Reset/disable auto-rules for a broadcast group
+
+    Query Parameters:
+    - keep_members: If True, keeps existing members. If False (default), clears members list.
+    """
+    try:
+        tenant_id = request.headers.get("X-Tenant-Id")
+        if not tenant_id:
+            raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+        # Get group
+        group = db.query(BroadcastGroups).filter(
+            BroadcastGroups.id == group_id,
+            BroadcastGroups.tenant_id == tenant_id
+        ).first()
+
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        # Store counts before reset
+        members_before = len(group.members or [])
+        had_rules = bool(group.auto_rules)
+
+        # Reset rules
+        group.auto_rules = None
+
+        # Optionally clear members
+        if not keep_members:
+            group.members = []
+
+        db.commit()
+
+        # Clear cache
+        with cache_lock:
+            cache_keys = [
+                f"groups:{tenant_id}",
+                f"group:{group_id}"
+            ]
+            for key in cache_keys:
+                if key in custom_cache:
+                    del custom_cache[key]
+
+        return {
+            "message": "Automation reset successfully",
+            "group_id": group_id,
+            "group_name": group.name,
+            "had_rules": had_rules,
+            "members_before": members_before,
+            "members_after": len(group.members or []),
+            "members_kept": keep_members
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error resetting group rules: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error resetting automation: {str(e)}")
+
+# ===================================
+# END AUTO-RULES ENDPOINTS
+# ===================================
 
 def _extract_contact_name(row, columns):
     """Helper to extract contact name from Excel row"""
