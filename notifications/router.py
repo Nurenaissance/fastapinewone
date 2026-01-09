@@ -320,39 +320,8 @@ def get_limited_notifications(
         logger.error(f"Error in get_limited_notifications: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch notifications")
 
-@router.delete("/notifications/{notification_id}")
-def delete_notification(
-    notification_id: int,
-    request: Request,
-    db: Session = Depends(get_db)
-):
-    """
-    Delete a specific notification with tenant validation.
-    """
-    try:
-        tenant_id = get_tenant_id_from_request(request)
-        
-        # Include tenant_id in filter for security
-        deleted_count = (db.query(Notifications)
-                        .filter(
-                            Notifications.id == notification_id,
-                            Notifications.tenant_id == tenant_id
-                        )
-                        .delete())
-        
-        if deleted_count == 0:
-            raise HTTPException(status_code=404, detail="Notification not found")
-        
-        db.commit()
-        
-        return {"message": "Notification deleted successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error deleting notification {notification_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete notification")
+# IMPORTANT: Specific routes must come BEFORE generic path parameter routes
+# Otherwise FastAPI will try to match "all", "bulk" as notification_id integers
 
 @router.delete("/notifications/bulk")
 def delete_notifications_bulk(
@@ -365,30 +334,30 @@ def delete_notifications_bulk(
     """
     try:
         tenant_id = get_tenant_id_from_request(request)
-        
+
         if not notification_ids:
             raise HTTPException(status_code=400, detail="No notification IDs provided")
-        
+
         if len(notification_ids) > 100:  # Prevent too large bulk operations
             raise HTTPException(status_code=400, detail="Cannot delete more than 100 notifications at once")
-        
+
         deleted_count = (db.query(Notifications)
                         .filter(
                             Notifications.id.in_(notification_ids),
                             Notifications.tenant_id == tenant_id
                         )
                         .delete(synchronize_session=False))
-        
+
         if deleted_count == 0:
             raise HTTPException(status_code=404, detail="No notifications found to delete")
-        
+
         db.commit()
-        
+
         return {
             "message": f"Successfully deleted {deleted_count} notifications",
             "deleted_count": deleted_count
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -407,33 +376,33 @@ def delete_all_notifications(
     """
     try:
         tenant_id = get_tenant_id_from_request(request)
-        
+
         if not confirm:
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail="Set confirm=true to delete all notifications"
             )
-        
+
         # Get count first
         count = (db.query(func.count(Notifications.id))
                 .filter(Notifications.tenant_id == tenant_id)
                 .scalar())
-        
+
         if count == 0:
             raise HTTPException(status_code=404, detail="No notifications found for this tenant")
-        
+
         # Bulk delete
         deleted_count = (db.query(Notifications)
                         .filter(Notifications.tenant_id == tenant_id)
                         .delete(synchronize_session=False))
-        
+
         db.commit()
-        
+
         return {
             "message": f"Successfully deleted all {deleted_count} notifications",
             "deleted_count": deleted_count
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -452,7 +421,7 @@ def delete_notifications_by_contact(
     """
     try:
         tenant_id = get_tenant_id_from_request(request)
-        
+
         # Verify contact exists and belongs to tenant
         contact = (db.query(Contact.id, Contact.phone)
                   .filter(
@@ -460,10 +429,10 @@ def delete_notifications_by_contact(
                       Contact.tenant_id == tenant_id
                   )
                   .first())
-        
+
         if not contact:
             raise HTTPException(status_code=404, detail="Contact not found")
-        
+
         # Primary deletion using contact_id foreign key (much faster)
         deleted_count = (db.query(Notifications)
                         .filter(
@@ -471,12 +440,12 @@ def delete_notifications_by_contact(
                             Notifications.contact_id == contact_id
                         )
                         .delete(synchronize_session=False))
-        
+
         # Fallback: Delete by phone number pattern for older notifications without contact_id
         if deleted_count == 0:
             phone_number = contact.phone
             clean_phone = ''.join(filter(str.isdigit, phone_number))
-            
+
             if clean_phone:
                 fallback_count = (db.query(Notifications)
                                 .filter(
@@ -486,24 +455,59 @@ def delete_notifications_by_contact(
                                 )
                                 .delete(synchronize_session=False))
                 deleted_count = fallback_count
-        
+
         if deleted_count == 0:
             raise HTTPException(status_code=404, detail="No notifications found for this contact")
-        
+
         db.commit()
-        
+
         return {
             "message": f"Successfully deleted {deleted_count} notifications for contact {contact_id}",
             "deleted_count": deleted_count,
             "contact_phone": contact.phone
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
         logger.error(f"Error deleting notifications by contact {contact_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete notifications")
+
+@router.delete("/notifications/{notification_id}")
+def delete_notification(
+    notification_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """
+    Delete a specific notification with tenant validation.
+    NOTE: This route must come AFTER specific routes like /notifications/all
+    """
+    try:
+        tenant_id = get_tenant_id_from_request(request)
+
+        # Include tenant_id in filter for security
+        deleted_count = (db.query(Notifications)
+                        .filter(
+                            Notifications.id == notification_id,
+                            Notifications.tenant_id == tenant_id
+                        )
+                        .delete())
+
+        if deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Notification not found")
+
+        db.commit()
+
+        return {"message": "Notification deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting notification {notification_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete notification")
 
 @router.get("/notifications/stats")
 def get_notification_stats(

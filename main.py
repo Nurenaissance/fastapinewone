@@ -111,8 +111,8 @@ async def jwt_middleware(request: Request, call_next):
             request.state.is_service_request = True
             request.state.service_name = service_name
 
-            # Still get X-Tenant-Id for tenant-specific operations
-            tenant_id = request.headers.get("X-Tenant-Id")
+            # Still get X-Tenant-Id for tenant-specific operations (support both cases for compatibility)
+            tenant_id = request.headers.get("X-Tenant-Id") or request.headers.get("X-Tenant-ID")
             if tenant_id:
                 request.state.tenant_id = tenant_id
 
@@ -140,7 +140,8 @@ async def jwt_middleware(request: Request, call_next):
         # Decode and verify JWT
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], options={"verify_aud": False})
         request.state.user_id = payload.get("sub")
-        request.state.tenant_id = payload.get("tenant_id")
+        # Support both X-Tenant-Id and X-Tenant-ID headers for backward compatibility
+        request.state.tenant_id = payload.get("tenant_id") or request.headers.get("X-Tenant-Id") or request.headers.get("X-Tenant-ID")
         request.state.tier = payload.get("tier", "free")
         request.state.is_service_request = False
 

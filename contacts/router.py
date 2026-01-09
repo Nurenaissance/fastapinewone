@@ -10,6 +10,10 @@ import math
 
 router = APIRouter()
 
+# Helper function to get tenant_id from headers (supports both X-Tenant-Id and X-Tenant-ID for backward compatibility)
+def get_tenant_id(request: Request) -> Optional[str]:
+    return request.headers.get("X-Tenant-Id") or request.headers.get("X-Tenant-ID")
+
 @router.get("/contacts/filter/{page_no}")
 def get_filtered_contacts(
     request: Request,
@@ -20,7 +24,7 @@ def get_filtered_contacts(
     db: orm.Session = Depends(get_db)
 ):
     try:
-        tenant_id = request.headers.get("X-Tenant-Id")
+        tenant_id = get_tenant_id(request)
         if not tenant_id:
             raise HTTPException(status_code=400, detail="Tenant ID missing in headers")
 
@@ -111,7 +115,7 @@ def get_limited_contacts(
     sort_by: Optional[str] = "asc",
     db: orm.Session = Depends(get_db),
 ):
-    tenant_id = req.headers.get("X-Tenant-Id")
+    tenant_id = get_tenant_id(req)
     if not tenant_id:
         raise HTTPException(status_code=400, detail="Tenant ID missing in headers")
 
@@ -292,8 +296,8 @@ async def create_contact(request: Request, db: orm.Session = Depends(get_db)):
             last_delivered=body.get('last_delivered'),
             last_seen=body.get('last_seen'),
             last_replied=body.get('last_replied'),
-            customField=body.get('customField'),
-            manual_mode=body.get('manual_mode', False)
+            customField=body.get('customField')
+            # manual_mode=body.get('manual_mode', False)  # TODO: Uncomment when column is added to database
         )
 
         db.add(new_contact)
@@ -362,8 +366,8 @@ async def update_single_contact(
             contact.last_replied = body['last_replied']
         if 'customField' in body:
             contact.customField = body['customField']
-        if 'manual_mode' in body:
-            contact.manual_mode = body['manual_mode']
+        # if 'manual_mode' in body:  # TODO: Uncomment when column is added to database
+        #     contact.manual_mode = body['manual_mode']
 
         db.commit()
         db.refresh(contact)
@@ -383,54 +387,55 @@ async def update_single_contact(
         raise HTTPException(status_code=500, detail=f"Error updating contact: {str(e)}")
 
 
-@router.patch("/contacts/{contact_id}/manual-mode")
-async def toggle_manual_mode(
-    contact_id: int,
-    request: Request,
-    db: orm.Session = Depends(get_db)
-):
-    """Toggle manual mode for a contact to disable/enable automation"""
-    tenant_id = request.headers.get("X-Tenant-Id")
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail="Tenant ID missing in headers")
-
-    try:
-        body = await request.json()
-        manual_mode = body.get('manual_mode')
-
-        if manual_mode is None:
-            raise HTTPException(status_code=400, detail="manual_mode field is required")
-
-        # Find contact
-        contact = db.query(Contact).filter(
-            Contact.id == contact_id,
-            Contact.tenant_id == tenant_id
-        ).first()
-
-        if not contact:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Contact with ID {contact_id} not found for this tenant"
-            )
-
-        # Update manual mode
-        contact.manual_mode = manual_mode
-        db.commit()
-        db.refresh(contact)
-
-        return {
-            "contact_id": contact.id,
-            "phone": contact.phone,
-            "name": contact.name,
-            "manual_mode": contact.manual_mode,
-            "message": f"Manual mode {'enabled' if manual_mode else 'disabled'} for contact"
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error toggling manual mode: {str(e)}")
+# TODO: Uncomment when manual_mode column is added to database
+# @router.patch("/contacts/{contact_id}/manual-mode")
+# async def toggle_manual_mode(
+#     contact_id: int,
+#     request: Request,
+#     db: orm.Session = Depends(get_db)
+# ):
+#     """Toggle manual mode for a contact to disable/enable automation"""
+#     tenant_id = request.headers.get("X-Tenant-Id")
+#     if not tenant_id:
+#         raise HTTPException(status_code=400, detail="Tenant ID missing in headers")
+#
+#     try:
+#         body = await request.json()
+#         manual_mode = body.get('manual_mode')
+#
+#         if manual_mode is None:
+#             raise HTTPException(status_code=400, detail="manual_mode field is required")
+#
+#         # Find contact
+#         contact = db.query(Contact).filter(
+#             Contact.id == contact_id,
+#             Contact.tenant_id == tenant_id
+#         ).first()
+#
+#         if not contact:
+#             raise HTTPException(
+#                 status_code=404,
+#                 detail=f"Contact with ID {contact_id} not found for this tenant"
+#             )
+#
+#         # Update manual mode
+#         contact.manual_mode = manual_mode
+#         db.commit()
+#         db.refresh(contact)
+#
+#         return {
+#             "contact_id": contact.id,
+#             "phone": contact.phone,
+#             "name": contact.name,
+#             "manual_mode": contact.manual_mode,
+#             "message": f"Manual mode {'enabled' if manual_mode else 'disabled'} for contact"
+#         }
+#
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         db.rollback()
+#         raise HTTPException(status_code=500, detail=f"Error toggling manual mode: {str(e)}")
 
 
 @router.get("/contact")
