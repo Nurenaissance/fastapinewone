@@ -1,0 +1,6 @@
+# Ensure requirements.txt is always treated as text with LF line endings
+requirements.txt text eol=lf
+*.txt text eol=lf
+*.sh text eol=lf
+*.sql text eol=lf
+*.md text eol=lf
