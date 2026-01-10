@@ -116,8 +116,16 @@ class RuleEvaluator:
                     try:
                         actual_dt = RuleEvaluator._parse_datetime(actual)
                         expected_dt = RuleEvaluator._parse_datetime(expected)
-                        logger.debug(f"Date comparison: {actual_dt} > {expected_dt} = {actual_dt > expected_dt}")
-                        return actual_dt > expected_dt
+
+                        # Make both timezone-naive for comparison
+                        if actual_dt.tzinfo is not None:
+                            actual_dt = actual_dt.replace(tzinfo=None)
+                        if expected_dt.tzinfo is not None:
+                            expected_dt = expected_dt.replace(tzinfo=None)
+
+                        result = actual_dt > expected_dt
+                        logger.debug(f"Date comparison: {actual_dt} > {expected_dt} = {result}")
+                        return result
                     except Exception as e:
                         logger.error(f"Failed to parse datetime for greater_than: actual={actual}, expected={expected}, error={e}")
                         return False
@@ -128,8 +136,16 @@ class RuleEvaluator:
                     try:
                         actual_dt = RuleEvaluator._parse_datetime(actual)
                         expected_dt = RuleEvaluator._parse_datetime(expected)
-                        logger.debug(f"Date comparison: {actual_dt} < {expected_dt} = {actual_dt < expected_dt}")
-                        return actual_dt < expected_dt
+
+                        # Make both timezone-naive for comparison
+                        if actual_dt.tzinfo is not None:
+                            actual_dt = actual_dt.replace(tzinfo=None)
+                        if expected_dt.tzinfo is not None:
+                            expected_dt = expected_dt.replace(tzinfo=None)
+
+                        result = actual_dt < expected_dt
+                        logger.debug(f"Date comparison: {actual_dt} < {expected_dt} = {result}")
+                        return result
                     except Exception as e:
                         logger.error(f"Failed to parse datetime for less_than: actual={actual}, expected={expected}, error={e}")
                         return False
@@ -172,16 +188,35 @@ class RuleEvaluator:
         if isinstance(value, datetime):
             return value
         if isinstance(value, str):
-            # Try ISO format
-            try:
-                return datetime.fromisoformat(value.replace('Z', '+00:00'))
-            except ValueError:
-                # Try other common formats
+            # Remove any timezone info for consistent comparison
+            value = value.replace('Z', '').strip()
+
+            # Try multiple formats in order of likelihood
+            formats = [
+                '%Y-%m-%dT%H:%M:%S.%f',     # 2024-11-30T22:45:00.000
+                '%Y-%m-%dT%H:%M:%S',         # 2024-11-30T22:45:00
+                '%Y-%m-%dT%H:%M',            # 2024-11-30T22:45 (from frontend!)
+                '%Y-%m-%d %H:%M:%S.%f',      # 2024-11-30 22:45:00.000
+                '%Y-%m-%d %H:%M:%S',         # 2024-11-30 22:45:00
+                '%Y-%m-%d %H:%M',            # 2024-11-30 22:45
+                '%Y-%m-%d',                  # 2024-11-30
+            ]
+
+            for fmt in formats:
                 try:
-                    return datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+                    parsed = datetime.strptime(value, fmt)
+                    logger.debug(f"Parsed '{value}' using format '{fmt}' → {parsed}")
+                    return parsed
                 except ValueError:
-                    return datetime.strptime(value, '%Y-%m-%d')
-        raise ValueError(f"Cannot parse datetime from {type(value)}")
+                    continue
+
+            # If all formats fail, try fromisoformat as last resort
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                pass
+
+        raise ValueError(f"Cannot parse datetime from value='{value}' type={type(value)}")
 
     @staticmethod
     def get_matching_contacts(db_session, tenant_id: str, rules: Dict[str, Any]) -> List[Contact]:

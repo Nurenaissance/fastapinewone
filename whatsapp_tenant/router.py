@@ -975,6 +975,44 @@ async def sync_group_members(
         raise HTTPException(status_code=500, detail=f"Error syncing group: {str(e)}")
 
 
+@router.get("/broadcast-groups/debug-contacts")
+async def debug_contacts(
+    request: Request,
+    db: orm.Session = Depends(get_db)
+):
+    """Debug endpoint to check contact data"""
+    try:
+        tenant_id = request.headers.get("X-Tenant-Id")
+        if not tenant_id:
+            raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+        # Get all contacts for tenant
+        contacts = db.query(Contact).filter(
+            Contact.tenant_id == tenant_id
+        ).limit(20).all()
+
+        return {
+            "tenant_id": tenant_id,
+            "tenant_id_type": type(tenant_id).__name__,
+            "total_contacts_in_sample": len(contacts),
+            "contacts": [
+                {
+                    "id": c.id,
+                    "phone": c.phone,
+                    "name": c.name,
+                    "createdOn": c.createdOn.isoformat() if c.createdOn else None,
+                    "createdOn_type": type(c.createdOn).__name__,
+                    "tenant_id": c.tenant_id,
+                    "tenant_id_type": type(c.tenant_id).__name__
+                }
+                for c in contacts
+            ]
+        }
+
+    except Exception as e:
+        logger.error(f"Error in debug endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
 @router.post("/broadcast-groups/test-rules")
 async def test_rules(
     payload: RuleTestRequest,
@@ -1518,12 +1556,261 @@ def get_all_tenant_ids(db: orm.Session = Depends(get_db)):
         # Optimized query - only fetch IDs
         tenant_ids = db.query(Tenant.id).all()
         result = {"tenant_ids": [tenant_id[0] for tenant_id in tenant_ids]}
-        
+
         # Cache the result with shorter TTL since this might change frequently
         set_cache(cache_key, result)  # 1 minute cache
-        
+
         return result
-        
+
     except Exception as e:
         logger.error(f"Error fetching tenant IDs: {str(e)}")
         raise HTTPException(status_code=500, detail="Error fetching tenant IDs")
+
+@router.get("/templates/")
+async def get_whatsapp_templates(
+    request: Request,
+    db: orm.Session = Depends(get_db),
+    x_tenant_id: Optional[str] = Header(None)
+):
+    """
+    Fetch WhatsApp message templates from Meta WhatsApp Business API
+    Returns all message templates for the tenant's WhatsApp Business Account
+    """
+    try:
+        if not x_tenant_id:
+            raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+        # Check cache first
+        cache_key = f"whatsapp_templates:{x_tenant_id}"
+        cached_templates = get_cache(cache_key)
+        if cached_templates:
+            logger.info("[CACHE HIT] Returning cached WhatsApp templates")
+            return cached_templates
+
+        # Get tenant's WhatsApp data
+        whatsapp_data = db.query(WhatsappTenantData).filter(
+            WhatsappTenantData.tenant_id == x_tenant_id
+        ).first()
+
+        if not whatsapp_data:
+            raise HTTPException(
+                status_code=404,
+                detail="WhatsApp account not found for this tenant"
+            )
+
+        if not whatsapp_data.access_token:
+            raise HTTPException(
+                status_code=400,
+                detail="No access token found for this tenant"
+            )
+
+        if not whatsapp_data.business_account_id:
+            raise HTTPException(
+                status_code=400,
+                detail="No WhatsApp Business Account ID found"
+            )
+
+        # Fetch templates from Meta API
+        waba_id = str(whatsapp_data.business_account_id)
+        access_token = whatsapp_data.access_token
+
+        # Use Meta Graph API v18.0
+        api_url = f"https://graph.facebook.com/v18.0/{waba_id}/message_templates"
+
+        logger.info(f"Fetching templates for WABA {waba_id}")
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                api_url,
+                params={
+                    "access_token": access_token,
+                    "limit": 1000  # Fetch up to 1000 templates
+                }
+            )
+
+            if response.status_code == 401:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid or expired access token. Please reconnect your WhatsApp account."
+                )
+            elif response.status_code == 403:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Access forbidden. Check your WhatsApp Business Account permissions."
+                )
+            elif response.status_code != 200:
+                error_data = response.json() if response.content else {}
+                error_message = error_data.get('error', {}).get('message', 'Unknown error')
+                logger.error(f"Meta API error: {response.status_code} - {error_message}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Failed to fetch templates from WhatsApp: {error_message}"
+                )
+
+            data = response.json()
+            templates = data.get("data", [])
+
+            # Transform templates to a cleaner format
+            formatted_templates = []
+            for template in templates:
+                formatted_template = {
+                    "id": template.get("id"),
+                    "name": template.get("name"),
+                    "language": template.get("language"),
+                    "status": template.get("status"),
+                    "category": template.get("category"),
+                    "components": template.get("components", []),
+                    "rejected_reason": template.get("rejected_reason"),
+                    "quality_score": template.get("quality_score", {})
+                }
+                formatted_templates.append(formatted_template)
+
+            result = {
+                "total_templates": len(formatted_templates),
+                "templates": formatted_templates,
+                "waba_id": waba_id
+            }
+
+            # Cache the result for 5 minutes (templates don't change frequently)
+            set_cache(cache_key, result)
+            logger.info(f"Fetched and cached {len(formatted_templates)} templates for {x_tenant_id}")
+
+            return result
+
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        logger.error("Timeout while fetching templates from Meta API")
+        raise HTTPException(
+            status_code=504,
+            detail="Request timeout while fetching templates from WhatsApp"
+        )
+    except Exception as e:
+        logger.error(f"Error fetching WhatsApp templates: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch WhatsApp templates: {str(e)}"
+        )
+
+@router.get("/templates/{template_name}")
+async def get_whatsapp_template_by_name(
+    template_name: str,
+    request: Request,
+    db: orm.Session = Depends(get_db),
+    x_tenant_id: Optional[str] = Header(None)
+):
+    """
+    Get a specific WhatsApp template by name
+    """
+    try:
+        if not x_tenant_id:
+            raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+        # Fetch all templates (from cache if available)
+        cache_key = f"whatsapp_templates:{x_tenant_id}"
+        cached_templates = get_cache(cache_key)
+
+        templates_data = None
+        if cached_templates:
+            templates_data = cached_templates
+        else:
+            # Call the main templates endpoint
+            templates_response = await get_whatsapp_templates(request, db, x_tenant_id)
+            templates_data = templates_response
+
+        # Find the specific template
+        templates = templates_data.get("templates", [])
+        matching_template = next(
+            (t for t in templates if t.get("name") == template_name),
+            None
+        )
+
+        if not matching_template:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Template '{template_name}' not found"
+            )
+
+        return matching_template
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching template {template_name}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch template: {str(e)}"
+        )
+
+@router.post("/templates/refresh")
+def refresh_templates_cache(
+    x_tenant_id: Optional[str] = Header(None)
+):
+    """
+    Clear the templates cache to force a fresh fetch from Meta API
+    """
+    try:
+        if not x_tenant_id:
+            raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+        cache_key = f"whatsapp_templates:{x_tenant_id}"
+
+        with cache_lock:
+            if cache_key in custom_cache:
+                del custom_cache[cache_key]
+                logger.info(f"Cleared templates cache for {x_tenant_id}")
+                return {
+                    "message": "Templates cache cleared successfully",
+                    "tenant_id": x_tenant_id
+                }
+            else:
+                return {
+                    "message": "No cached templates found",
+                    "tenant_id": x_tenant_id
+                }
+
+    except Exception as e:
+        logger.error(f"Error clearing templates cache: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clear cache: {str(e)}"
+        )
+
+@router.get("/templates/filter/by-status")
+async def filter_templates_by_status(
+    status: str,
+    request: Request,
+    db: orm.Session = Depends(get_db),
+    x_tenant_id: Optional[str] = Header(None)
+):
+    """
+    Filter templates by status (APPROVED, PENDING, REJECTED, etc.)
+    """
+    try:
+        if not x_tenant_id:
+            raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+        # Fetch all templates
+        templates_data = await get_whatsapp_templates(request, db, x_tenant_id)
+        templates = templates_data.get("templates", [])
+
+        # Filter by status (case-insensitive)
+        filtered = [
+            t for t in templates
+            if t.get("status", "").upper() == status.upper()
+        ]
+
+        return {
+            "status_filter": status.upper(),
+            "total_matching": len(filtered),
+            "templates": filtered
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error filtering templates by status: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to filter templates: {str(e)}"
+        )
