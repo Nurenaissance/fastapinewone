@@ -4,29 +4,7 @@ from datetime import datetime
 
 class BroadcastGroupMember(BaseModel):
     name: Optional[str] = None
-    phone: int  
-
-class BroadcastGroupCreate(BaseModel):
-    id: Optional[str] = None
-    name: str
-    members: Optional[List[BroadcastGroupMember]] = []
-    auto_rules: Optional[Dict[str, Any]] = None  # Will be defined after AutoRules class
-
-class BroadcastGroupResponse(BaseModel):
-    id: str
-    name: str
-    members: Optional[List[dict]] = []
-    auto_rules: Optional[Dict[str, Any]] = None
-
-    class Config:
-        orm_mode = True     
-class BroadcastGroupAddContacts(BaseModel):
-    groupName: str
-    contacts: List[BroadcastGroupMember]
-
-class BroadcastGroupContactDelete(BaseModel):
-    groupName: str
-    contactPhone: int
+    phone: int
 
 # Auto-rules schemas for dynamic group membership
 class DateRangeValue(BaseModel):
@@ -46,6 +24,28 @@ class AutoRules(BaseModel):
     enabled: bool = True
     logic: Literal["AND"] = "AND"  # Future: support "OR"
     conditions: List[RuleCondition] = []
+
+class BroadcastGroupCreate(BaseModel):
+    id: Optional[str] = None
+    name: str
+    members: Optional[List[BroadcastGroupMember]] = []
+    auto_rules: Optional[AutoRules] = None  # Now properly typed
+
+class BroadcastGroupResponse(BaseModel):
+    id: str
+    name: str
+    members: Optional[List[dict]] = []
+    auto_rules: Optional[Dict[str, Any]] = None
+
+    class Config:
+        orm_mode = True     
+class BroadcastGroupAddContacts(BaseModel):
+    groupName: str
+    contacts: List[BroadcastGroupMember]
+
+class BroadcastGroupContactDelete(BaseModel):
+    groupName: str
+    contactPhone: int
 
 class BroadcastGroupUpdateRules(BaseModel):
     auto_rules: AutoRules

@@ -510,12 +510,18 @@ async def create_group_logic(request: BroadcastGroupCreate, db, x_tenant_id):
         logger.info(f"  auto_rules type: {type(request.auto_rules)}")
         logger.info(f"  auto_rules value: {request.auto_rules}")
 
-        # Ensure auto_rules are properly set
-        auto_rules_data = request.auto_rules
-        if auto_rules_data:
-            # If it's a Pydantic model, convert to dict
-            if hasattr(auto_rules_data, 'dict'):
-                auto_rules_data = auto_rules_data.dict()
+        # Ensure auto_rules are properly converted to dict for JSON storage
+        auto_rules_data = None
+        if request.auto_rules:
+            # If it's a Pydantic model (AutoRules), convert to dict
+            if hasattr(request.auto_rules, 'dict'):
+                auto_rules_data = request.auto_rules.dict()
+            elif hasattr(request.auto_rules, 'model_dump'):
+                # Pydantic v2 uses model_dump() instead of dict()
+                auto_rules_data = request.auto_rules.model_dump()
+            else:
+                # Already a dict
+                auto_rules_data = request.auto_rules
             logger.info(f"  Converted auto_rules: {auto_rules_data}")
 
         new_group = BroadcastGroups(
@@ -530,9 +536,13 @@ async def create_group_logic(request: BroadcastGroupCreate, db, x_tenant_id):
         db.commit()
         db.refresh(new_group)
 
-        # DEBUG: Verify what was saved
+        # DEBUG: Verify what was actually saved to database
         logger.info(f"  Saved auto_rules: {new_group.auto_rules}")
         logger.info(f"  Saved auto_rules type: {type(new_group.auto_rules)}")
+
+        # Additional verification: query the group directly to confirm persistence
+        verification_query = db.query(BroadcastGroups).filter(BroadcastGroups.id == group_id).first()
+        logger.info(f"  Verification - DB auto_rules: {verification_query.auto_rules}")
 
         # If auto_rules are enabled, sync members automatically
         if new_group.auto_rules and new_group.auto_rules.get('enabled'):
@@ -592,10 +602,14 @@ def get_groups(db: orm.Session = Depends(get_db), x_tenant_id: Optional[str] = H
             return cached_groups
 
         groups = get_all_broadcast_groups(x_tenant_id, db=db)
-        
+
+        # DEBUG: Log what we're returning
+        for group in groups:
+            logger.info(f"Group '{group.name}': auto_rules={group.auto_rules}")
+
         # Cache the result
         set_cache(cache_key, groups)
-        
+
         return groups
     except Exception as e:
         logger.error(f"Error fetching broadcast groups: {str(e)}")
