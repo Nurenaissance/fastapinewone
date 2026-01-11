@@ -12,10 +12,10 @@ DATABASE_URL="postgresql://nurenai:Biz1nurenWar*@nurenaistore.postgres.database.
 # Set up SQLAlchemy engine with improved connection pool configuration
 engine = create_engine(
     DATABASE_URL,
-    # Connection pool settings - REDUCED to prevent Azure connection exhaustion
+    # Connection pool settings - AGGRESSIVE REDUCTION for Azure connection exhaustion
     poolclass=QueuePool,         # Explicit pool class
-    pool_size=3,                 # CRITICAL FIX: Reduced from 20 to 3 (with 4 workers = max 12 connections)
-    max_overflow=2,              # CRITICAL FIX: Reduced from 30 to 2 (allows up to 5 per worker)
+    pool_size=2,                 # REDUCED: 2 connections per worker
+    max_overflow=1,              # REDUCED: Only 1 overflow (max 3 per worker)
     pool_timeout=30,             # Reduced from 120 - fail faster if no connections available
     pool_recycle=1800,           # Recycle connections after 30 minutes (Azure timeout is usually 1 hour)
     pool_pre_ping=True,          # Validate connections before use (handles disconnects)
