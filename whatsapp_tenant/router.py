@@ -505,23 +505,42 @@ async def create_group_logic(request: BroadcastGroupCreate, db, x_tenant_id):
         members = [member.dict() for member in request.members]
         group_id = request.id or str(uuid4())
 
+        # DEBUG: Log what we received
+        logger.info(f"Creating group '{request.name}' (ID: {group_id})")
+        logger.info(f"  auto_rules type: {type(request.auto_rules)}")
+        logger.info(f"  auto_rules value: {request.auto_rules}")
+
+        # Ensure auto_rules are properly set
+        auto_rules_data = request.auto_rules
+        if auto_rules_data:
+            # If it's a Pydantic model, convert to dict
+            if hasattr(auto_rules_data, 'dict'):
+                auto_rules_data = auto_rules_data.dict()
+            logger.info(f"  Converted auto_rules: {auto_rules_data}")
+
         new_group = BroadcastGroups(
             id=group_id,
             name=request.name,
             members=members,
             tenant_id=x_tenant_id,
-            auto_rules=request.auto_rules
+            auto_rules=auto_rules_data
         )
 
         db.add(new_group)
         db.commit()
         db.refresh(new_group)
 
+        # DEBUG: Verify what was saved
+        logger.info(f"  Saved auto_rules: {new_group.auto_rules}")
+        logger.info(f"  Saved auto_rules type: {type(new_group.auto_rules)}")
+
         # If auto_rules are enabled, sync members automatically
-        if request.auto_rules and request.auto_rules.get('enabled'):
+        if new_group.auto_rules and new_group.auto_rules.get('enabled'):
             logger.info(f"Auto-rules enabled for group {group_id}, syncing members...")
             sync_result = GroupService.sync_group_members(new_group, db)
             logger.info(f"Smart group created with {sync_result.get('members_after', 0)} members")
+        elif auto_rules_data:
+            logger.warning(f"auto_rules were provided but enabled=False or missing: {new_group.auto_rules}")
 
         # Clear group cache
         with cache_lock:
@@ -738,34 +757,8 @@ async def upload_and_add_contacts(
         file_bytes = await file.read()
         logger.info(f"File read completed in {time.time() - start_time:.2f}s")
 
-        # -----------------------------
-        # ASYNC EXTERNAL UPLOAD
-        # -----------------------------
-        async with aiohttp.ClientSession() as session:
-            files_data = aiohttp.FormData()
-            files_data.add_field(
-                "file",
-                file_bytes,
-                filename=file.filename,
-                content_type=file.content_type,
-            )
-            files_data.add_field("model_name", model_name)
-
-            status, response_text = await make_async_request(
-                session,
-                "POST",
-                "https://backeng4whatsapp-dxbmgpakhzf9bped.centralindia-01.azurewebsites.net/upload/",
-                data=files_data,
-                headers={
-                    "X-Tenant-Id": x_tenant_id,
-                    "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ3aGF0c2FwcF9ib3QiLCJ0ZW5hbnRfaWQiOiJhaSIsInJvbGUiOiJzeXN0ZW0iLCJ0aWVyIjoiZW50ZXJwcmlzZSIsInNjb3BlIjoic2VydmljZSIsImV4cCI6MjA1NDk3NDY2OX0.SLXxiBy00-NP9dBVcPl-9b5E0QtakNUajRKAjeXgFG8",
-                },
-            )
-
-            if status != 200:
-                raise HTTPException(
-                    status_code=400, detail=f"Upload failed: {response_text}"
-                )
+        # Note: Removed unnecessary Django backend upload call that required OpenAI API
+        # The Excel parsing below handles everything needed for broadcast groups
 
         # -----------------------------
         # EXCEL PARSING (OLD + NEW FORMAT)
@@ -775,7 +768,8 @@ async def upload_and_add_contacts(
             sheet_names = [s.lower() for s in excel_file.sheet_names]
 
             # Decide data sheet
-            if len(sheet_names) > 1 and "instruction" in sheet_names[0]:
+            # If first sheet is "Instructions", use second sheet for data
+            if len(sheet_names) > 1 and ("instructions" in sheet_names[0] or "instruction" in sheet_names[0]):
                 data_sheet_index = 1
             else:
                 data_sheet_index = 0
