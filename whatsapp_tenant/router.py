@@ -1822,3 +1822,139 @@ async def filter_templates_by_status(
             status_code=500,
             detail=f"Failed to filter templates: {str(e)}"
         )
+
+# =====================================================
+# SMART GROUP AUTO-SYNC SCHEDULER ENDPOINTS
+# =====================================================
+
+from .scheduler import smart_group_scheduler
+
+@router.get("/smart-groups/scheduler/status")
+async def get_scheduler_status(x_tenant_id: Optional[str] = Header(None)):
+    """
+    Get the status of the smart group auto-sync scheduler
+
+    Returns:
+        Scheduler status including next run time
+    """
+    if not x_tenant_id:
+        raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+    try:
+        status = smart_group_scheduler.get_status()
+        return {
+            "success": True,
+            "scheduler": status
+        }
+    except Exception as e:
+        logger.error(f"Error getting scheduler status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/smart-groups/scheduler/start")
+async def start_scheduler(
+    hour: int = 2,
+    minute: int = 0,
+    x_tenant_id: Optional[str] = Header(None)
+):
+    """
+    Start the smart group auto-sync scheduler
+
+    Args:
+        hour: Hour to run daily sync (0-23), default 2 AM
+        minute: Minute to run sync (0-59), default 0
+
+    Note: This affects all tenants globally
+    """
+    if not x_tenant_id:
+        raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+    try:
+        smart_group_scheduler.start(hour=hour, minute=minute)
+        status = smart_group_scheduler.get_status()
+
+        return {
+            "success": True,
+            "message": f"Scheduler started. Daily sync at {hour:02d}:{minute:02d}",
+            "scheduler": status
+        }
+    except Exception as e:
+        logger.error(f"Error starting scheduler: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/smart-groups/scheduler/stop")
+async def stop_scheduler(x_tenant_id: Optional[str] = Header(None)):
+    """
+    Stop the smart group auto-sync scheduler
+
+    Note: This affects all tenants globally
+    """
+    if not x_tenant_id:
+        raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+    try:
+        smart_group_scheduler.stop()
+
+        return {
+            "success": True,
+            "message": "Scheduler stopped"
+        }
+    except Exception as e:
+        logger.error(f"Error stopping scheduler: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/smart-groups/sync-all")
+async def trigger_manual_sync_all(x_tenant_id: Optional[str] = Header(None)):
+    """
+    Manually trigger a sync for ALL smart groups across ALL tenants
+
+    This can be used to test the sync or run it on-demand outside the schedule.
+
+    Returns:
+        Sync statistics
+    """
+    if not x_tenant_id:
+        raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+    try:
+        logger.info(f"Manual sync triggered by tenant: {x_tenant_id}")
+        result = smart_group_scheduler.trigger_manual_sync()
+
+        return {
+            "success": True,
+            "message": "Manual sync completed",
+            "stats": result
+        }
+    except Exception as e:
+        logger.error(f"Error in manual sync: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/smart-groups/sync-tenant")
+async def trigger_tenant_sync(
+    db: orm.Session = Depends(get_db),
+    x_tenant_id: Optional[str] = Header(None)
+):
+    """
+    Manually trigger a sync for smart groups of the current tenant only
+
+    Returns:
+        Sync statistics for this tenant
+    """
+    if not x_tenant_id:
+        raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+    try:
+        logger.info(f"Tenant-specific sync triggered for: {x_tenant_id}")
+        result = smart_group_scheduler.sync_tenant_smart_groups(x_tenant_id)
+
+        return {
+            "success": True,
+            "message": f"Sync completed for tenant {x_tenant_id}",
+            "stats": result
+        }
+    except Exception as e:
+        logger.error(f"Error in tenant sync: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

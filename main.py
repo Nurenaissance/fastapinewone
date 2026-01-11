@@ -46,10 +46,35 @@ if JWT_SECRET == 'CHANGE_THIS_TO_A_LONG_RANDOM_STRING':
 async def lifespan(app: FastAPI):
     """Manage application lifecycle - startup and shutdown"""
     logger.info("FastAPI application starting up...")
-    # Startup code (if needed)
+
+    # Startup code
+    # Initialize Smart Group Auto-Sync Scheduler
+    try:
+        from whatsapp_tenant.scheduler import smart_group_scheduler
+        # Start scheduler with daily sync at 2 AM
+        # You can change the time by setting SMART_GROUP_SYNC_HOUR in .env
+        sync_hour = int(os.getenv('SMART_GROUP_SYNC_HOUR', '2'))
+        sync_minute = int(os.getenv('SMART_GROUP_SYNC_MINUTE', '0'))
+
+        smart_group_scheduler.start(hour=sync_hour, minute=sync_minute)
+        logger.info(f"✅ Smart Group Auto-Sync Scheduler started (daily at {sync_hour:02d}:{sync_minute:02d})")
+    except Exception as e:
+        logger.error(f"❌ Failed to start Smart Group Scheduler: {str(e)}")
+
     yield
+
     # Shutdown code
     logger.info("FastAPI application shutting down...")
+
+    # Stop Smart Group Scheduler
+    try:
+        from whatsapp_tenant.scheduler import smart_group_scheduler
+        smart_group_scheduler.stop()
+        logger.info("Smart Group Scheduler stopped")
+    except Exception as e:
+        logger.error(f"Error stopping scheduler: {str(e)}")
+
+    # Other cleanup
     try:
         from conversations.router import cleanup_resources
         cleanup_resources()
