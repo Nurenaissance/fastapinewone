@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from config.database import SessionLocal
 from .models import BroadcastGroups
 from .group_service import GroupService
-from tenant.models import Tenant
+from models import Tenant
 import logging
 from datetime import datetime
 from typing import Dict, List
