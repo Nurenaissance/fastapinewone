@@ -48,6 +48,7 @@ def daily_task():
                 if restart_event.is_set():
                     logger.info("Restarting daily_task due to new event...")
                     restart_event.clear()
+                    db.close()  # CRITICAL: Close session before recursive call
                     return daily_task()
 
                 event = events_queue.popleft()
@@ -71,6 +72,7 @@ def daily_task():
                     if restart_event.is_set():
                         logger.info("Restarting daily_task due to new event...")
                         restart_event.clear()
+                        db.close()  # CRITICAL: Close session before recursive call
                         return daily_task()
                     datetime_time.sleep(interval)
 

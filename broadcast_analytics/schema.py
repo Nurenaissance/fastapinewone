@@ -18,4 +18,4 @@ class AnalyticsResponse(BaseModel):
     date: Optional[date] 
 
     class Config:
-        orm_mode = True
+        from_attributes = True

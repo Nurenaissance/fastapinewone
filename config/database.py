@@ -2,42 +2,61 @@ import os
 import logging
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.pool import QueuePool
+from sqlalchemy.pool import QueuePool, NullPool
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-DATABASE_URL="postgresql://nurenai:Biz1nurenWar*@nurenaistore.postgres.database.azure.com/nurenpostgres_Whatsapp"
+# Set USE_PGBOUNCER=true in environment if PgBouncer is enabled on Azure
+USE_PGBOUNCER = os.environ.get('USE_PGBOUNCER', 'false').lower() == 'true'
+DB_PORT = '6432' if USE_PGBOUNCER else '5432'
 
-# Set up SQLAlchemy engine with improved connection pool configuration
-engine = create_engine(
-    DATABASE_URL,
-    # Connection pool settings - AGGRESSIVE REDUCTION for Azure connection exhaustion
-    poolclass=QueuePool,         # Explicit pool class
-    pool_size=2,                 # REDUCED: 2 connections per worker
-    max_overflow=1,              # REDUCED: Only 1 overflow (max 3 per worker)
-    pool_timeout=30,             # Reduced from 120 - fail faster if no connections available
-    pool_recycle=1800,           # Recycle connections after 30 minutes (Azure timeout is usually 1 hour)
-    pool_pre_ping=True,          # Validate connections before use (handles disconnects)
-    
-    # Additional settings for Azure PostgreSQL
-    connect_args={
-        "sslmode": "require",            # Azure PostgreSQL requires SSL
-        "connect_timeout": 60,           # Increased connection timeout
-        "application_name": "FastAPI_Scheduler",  # Updated name
-        "keepalives_idle": 600,          # Keep connection alive (10 minutes)
-        "keepalives_interval": 30,       # Keepalive interval
-        "keepalives_count": 3            # Keepalive retries
-    },
-    
-    # Logging (set to False in production)
-    echo=False,                          # Set to True for SQL debugging
-    
-    # Engine settings - FIXED: Removed duplicate pool_reset_on_return
-    pool_reset_on_return='rollback',     # Handle failed transactions (ONLY ONE INSTANCE)
-    isolation_level="READ_COMMITTED",    # Default isolation level
-    future=True                          # Use SQLAlchemy 2.0 style
-)
+DATABASE_URL = f"postgresql://nurenai:Biz1nurenWar*@nurenaistore.postgres.database.azure.com:{DB_PORT}/nurenpostgres_Whatsapp"
+
+# Set up SQLAlchemy engine with connection pool configuration
+# When using PgBouncer, use NullPool (PgBouncer handles pooling)
+# Without PgBouncer, use QueuePool with conservative settings
+
+if USE_PGBOUNCER:
+    # PgBouncer handles connection pooling - use NullPool
+    engine = create_engine(
+        DATABASE_URL,
+        poolclass=NullPool,  # No application-level pooling (PgBouncer handles it)
+        connect_args={
+            "sslmode": "require",
+            "connect_timeout": 30,
+            "application_name": "FastAPI_PgBouncer",
+        },
+        echo=False,
+        isolation_level="READ_COMMITTED",
+        future=True
+    )
+    logger.info("Using PgBouncer mode (NullPool)")
+else:
+    # General Purpose D2s_v3 tier - can use larger pool
+    # Allocate ~30 connections for FastAPI (pool_size=5 * workers + overflow)
+    engine = create_engine(
+        DATABASE_URL,
+        poolclass=QueuePool,
+        pool_size=5,                 # 5 connections per worker (increased from 2)
+        max_overflow=5,              # 5 overflow (max 10 per worker)
+        pool_timeout=30,             # Fail faster if no connections
+        pool_recycle=1800,           # Recycle after 30 minutes
+        pool_pre_ping=True,          # Validate connections before use
+        connect_args={
+            "sslmode": "require",
+            "connect_timeout": 30,
+            "application_name": "FastAPI_Scheduler",
+            "keepalives_idle": 300,
+            "keepalives_interval": 30,
+            "keepalives_count": 3
+        },
+        echo=False,
+        pool_reset_on_return='rollback',
+        isolation_level="READ_COMMITTED",
+        future=True
+    )
+    logger.info("Using QueuePool mode - General Purpose tier (pool_size=5, max_overflow=5)")
 
 # Create a session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

@@ -124,9 +124,14 @@ async def view_conversation(
         conversations = (
             db.query(
                 Conversation.message_text,
-                Conversation.encrypted_message_text, 
+                Conversation.encrypted_message_text,
                 Conversation.date_time,
-                Conversation.sender
+                Conversation.sender,
+                Conversation.message_type,
+                Conversation.media_url,
+                Conversation.media_caption,
+                Conversation.media_filename,
+                Conversation.thumbnail_url
             )
             .filter(*filter_conditions)
             .order_by(Conversation.date_time.desc())
@@ -166,19 +171,32 @@ async def view_conversation(
         formatted_conversations = []
         for i, conv in enumerate(reversed(conversations)):
             text_to_append = conv.message_text
-            
+
             # Calculate the original index in the non-reversed list
             original_idx = len(conversations) - i - 1
-            
+
             # Use decrypted text if available
             if original_idx in decryption_results and decryption_results[original_idx] is not None:
                 text_to_append = decryption_results[original_idx]
-                
-            formatted_conversations.append({
+
+            conversation_data = {
                 "text": text_to_append,
                 "sender": conv.sender,
-                "time": conv.date_time
-            })
+                "time": conv.date_time,
+                "message_type": conv.message_type or "text"
+            }
+
+            # Add media fields if present
+            if conv.media_url:
+                conversation_data["media_url"] = conv.media_url
+            if conv.media_caption:
+                conversation_data["media_caption"] = conv.media_caption
+            if conv.media_filename:
+                conversation_data["media_filename"] = conv.media_filename
+            if conv.thumbnail_url:
+                conversation_data["thumbnail_url"] = conv.thumbnail_url
+
+            formatted_conversations.append(conversation_data)
 
         total_pages = (total_conversations + page_size - 1) // page_size
 

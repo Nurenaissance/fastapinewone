@@ -38,7 +38,7 @@ class BroadcastGroupResponse(BaseModel):
     auto_rules: Optional[Dict[str, Any]] = None
 
     class Config:
-        orm_mode = True     
+        from_attributes = True
 class BroadcastGroupAddContacts(BaseModel):
     groupName: str
     contacts: List[BroadcastGroupMember]
@@ -76,5 +76,4 @@ class WhatsappTenantDataSchema(BaseModel):
     prompt:Optional[str]
 
     class Config:
-        orm_mode = True
-        from_attributes = True  # Allows from_orm to work correctly
+        from_attributes = True
