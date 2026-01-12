@@ -710,7 +710,7 @@ async def create_contact_and_add_to_group(
             task = make_async_request(
                 session,
                 'POST',
-                "https://backeng4whatsapp-dxbmgpakhzf9bped.centralindia-01.azurewebsites.net/contacts/",
+                "https://django-faecdbgwhgepemec.canadacentral-01.azurewebsites.net/contacts/",
                 json=contact_payload,
                 headers={
                     "Content-Type": "application/json",
