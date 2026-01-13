@@ -16,24 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python version
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Create virtual environment and install dependencies
-        run: |
-          python -m venv antenv
-          source antenv/bin/activate
-          pip install --upgrade pip
-          pip install -r requirements.txt
-
-      # IMPORTANT: Include antenv in the deployment (don't rely on Oryx)
       - name: Upload artifact for deployment jobs
         uses: actions/upload-artifact@v4
         with:
           name: python-app
-          path: .
+          path: |
+            .
+            !.git/
+            !__pycache__/
+            !*.pyc
+            !.env
 
   deploy:
     runs-on: ubuntu-latest
