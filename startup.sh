@@ -3,6 +3,30 @@
 # FastAPI Startup Script for Azure App Service
 # This configures Gunicorn with multiple workers for better performance
 
+echo "=== Starting FastAPI Application ==="
+
+# Find and activate the virtual environment
+if [ -d "/tmp/8de529f56c18966/antenv" ]; then
+    echo "Activating virtual environment..."
+    source /tmp/8de529f56c18966/antenv/bin/activate
+elif [ -d "antenv" ]; then
+    echo "Activating local antenv..."
+    source antenv/bin/activate
+elif [ -d "/home/site/wwwroot/antenv" ]; then
+    echo "Activating wwwroot antenv..."
+    source /home/site/wwwroot/antenv/bin/activate
+fi
+
+# Add Python packages to PATH (fallback)
+export PATH="/tmp/8de529f56c18966/antenv/bin:$PATH"
+export PATH="/home/site/wwwroot/antenv/bin:$PATH"
+
+# Verify uvicorn is available
+if ! command -v gunicorn &> /dev/null; then
+    echo "gunicorn not found, installing dependencies..."
+    pip install -r requirements.txt
+fi
+
 # Set the number of workers (2-4 workers recommended for Azure B1/S1 instances)
 WORKERS=${WORKERS:-4}
 
