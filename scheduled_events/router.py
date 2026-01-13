@@ -33,6 +33,7 @@ scheduler_thread_lock = threading.Lock()
 # Configuration
 POLLING_INTERVAL_SECONDS = int(os.getenv('SCHEDULER_POLLING_INTERVAL', '10'))  # Reduced from 30 to 10 seconds
 STALE_PROCESSING_TIMEOUT_MINUTES = int(os.getenv('STALE_PROCESSING_TIMEOUT', '5'))  # Reset stuck events after 5 minutes
+MAX_EVENT_AGE_DAYS = int(os.getenv('MAX_EVENT_AGE_DAYS', '7'))  # Don't process events older than 7 days
 INSTANCE_ID = os.getenv('WEBSITE_INSTANCE_ID', os.getenv('HOSTNAME', 'default'))
 
 # ===================== HELPER FUNCTIONS =====================
@@ -82,6 +83,107 @@ def recover_stale_processing_events(db: orm.Session) -> int:
         logger.error(f"[Recovery] Error recovering stale events: {e}")
         db.rollback()
         return 0
+
+
+def expire_old_events(db: orm.Session) -> int:
+    """
+    Mark events older than MAX_EVENT_AGE_DAYS as 'expired'.
+    This prevents very old scheduled events from being sent.
+    Returns the number of events expired.
+    """
+    try:
+        now_ist = get_ist_now()
+        cutoff_date = (now_ist - timedelta(days=MAX_EVENT_AGE_DAYS)).date()
+
+        # Find old pending events that should be expired
+        old_events = db.query(ScheduledEvent).filter(
+            ScheduledEvent.status == "pending",
+            ScheduledEvent.date < cutoff_date
+        ).all()
+
+        expired_count = 0
+        for event in old_events:
+            event.status = "expired"
+            event.last_error = f"Event expired - scheduled date {event.date} is older than {MAX_EVENT_AGE_DAYS} days (instance: {INSTANCE_ID})"
+            event.updated_at = datetime.utcnow()
+            expired_count += 1
+            logger.warning(f"[Expiry] Event {event.id} expired (scheduled: {event.date}, cutoff: {cutoff_date})")
+
+        if expired_count > 0:
+            db.commit()
+            logger.info(f"[Expiry] Expired {expired_count} old events (older than {MAX_EVENT_AGE_DAYS} days)")
+
+        return expired_count
+
+    except Exception as e:
+        logger.error(f"[Expiry] Error expiring old events: {e}")
+        db.rollback()
+        return 0
+
+
+def auto_expire_past_events(db: orm.Session, today) -> int:
+    """
+    STRICT MODE: Automatically expire ALL events from past dates.
+    Past events missed their scheduled time and should NEVER be sent.
+    This is the critical function that prevents old messages from being delivered.
+    Returns the number of events expired.
+    """
+    try:
+        # Find ALL pending events from ANY past date
+        past_events = db.query(ScheduledEvent).filter(
+            ScheduledEvent.status == "pending",
+            ScheduledEvent.date < today  # ANY date before today
+        ).all()
+
+        expired_count = 0
+        for event in past_events:
+            event.status = "expired"
+            event.last_error = f"STRICT MODE: Event auto-expired - scheduled for {event.date} but today is {today}. Past events are never sent. (instance: {INSTANCE_ID})"
+            event.updated_at = datetime.utcnow()
+            expired_count += 1
+            logger.warning(f"[STRICT] Event {event.id} auto-expired (was scheduled for {event.date} {event.time}, missed delivery window)")
+
+        if expired_count > 0:
+            db.commit()
+            logger.info(f"[STRICT] Auto-expired {expired_count} past events - these will NOT be sent")
+
+        return expired_count
+
+    except Exception as e:
+        logger.error(f"[STRICT] Error auto-expiring past events: {e}")
+        db.rollback()
+        return 0
+
+
+def check_duplicate_event(db: orm.Session, tenant_id: str, template_name: str, phone_number: str, target_date) -> bool:
+    """
+    Check if a similar event already exists for the same tenant/template/phone/date.
+    Returns True if duplicate exists, False otherwise.
+    """
+    try:
+        existing = db.query(ScheduledEvent).filter(
+            ScheduledEvent.tenant_id == tenant_id,
+            ScheduledEvent.date == target_date,
+            ScheduledEvent.status == "pending"
+        ).all()
+
+        for event in existing:
+            value_data = event.value
+            if isinstance(value_data, str):
+                value_data = json.loads(value_data)
+
+            event_template = value_data.get('template', {}).get('name', '')
+            event_phones = value_data.get('phoneNumbers', [])
+
+            if event_template == template_name and phone_number in event_phones:
+                logger.info(f"[Dedup] Found duplicate event {event.id} for template '{template_name}' and phone '{phone_number}'")
+                return True
+
+        return False
+
+    except Exception as e:
+        logger.error(f"[Dedup] Error checking for duplicates: {e}")
+        return False
 
 
 def acquire_event_lock(event: ScheduledEvent, db: orm.Session) -> bool:
@@ -193,7 +295,11 @@ def handle_event_failure(event: ScheduledEvent, db: orm.Session, error_msg: str)
 
 
 def process_due_events():
-    """Process all events that are due (including past due events)"""
+    """
+    Process ONLY events scheduled for TODAY at the correct time.
+    Past events are automatically expired - they will NEVER be sent.
+    This ensures only intentionally scheduled messages are delivered.
+    """
     db = SessionLocal()
     try:
         now_ist = get_ist_now()
@@ -201,28 +307,25 @@ def process_due_events():
         current_time = now_ist.time()
 
         logger.info(f"[Scheduler] Checking for due events at {now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST (instance: {INSTANCE_ID})")
+        logger.info(f"[Scheduler] STRICT MODE: Only processing events for TODAY ({today})")
 
-        # Step 1: Recover any events stuck in "processing" state
+        # Step 1: AUTO-EXPIRE all past events - they missed their window
+        # This is CRITICAL - past events should NEVER be sent
+        expired_count = auto_expire_past_events(db, today)
+        if expired_count > 0:
+            logger.warning(f"[Scheduler] Auto-expired {expired_count} past events (missed their scheduled date)")
+
+        # Step 2: Recover any events stuck in "processing" state (only for today)
         recover_stale_processing_events(db)
 
-        # Step 2: Find events that are due:
-        # 1. Events scheduled for today with time <= current time
-        # 2. Events from past dates that were never processed
-        # Status must be 'pending' and retry_count < max_retries
+        # Step 3: Find events that are due - ONLY TODAY's events
+        # STRICT: We NEVER process past dates. Only today, only if time has passed.
         due_events = db.query(ScheduledEvent).filter(
             ScheduledEvent.status == "pending",
-            ScheduledEvent.date.isnot(None),  # Ensure date is not null
-            ScheduledEvent.time.isnot(None),  # Ensure time is not null
-            or_(
-                # Past dates (missed events)
-                ScheduledEvent.date < today,
-                # Today's events that are due
-                and_(
-                    ScheduledEvent.date == today,
-                    ScheduledEvent.time <= current_time
-                )
-            )
-        ).order_by(ScheduledEvent.date, ScheduledEvent.time).all()
+            ScheduledEvent.date == today,  # ONLY TODAY - no exceptions
+            ScheduledEvent.time.isnot(None),
+            ScheduledEvent.time <= current_time  # Time must have passed
+        ).order_by(ScheduledEvent.time).all()
 
         if due_events:
             logger.info(f"[Scheduler] Found {len(due_events)} due events to process")
@@ -321,6 +424,24 @@ def startup_event():
 
     try:
         logger.info(f"[Scheduler] Initializing... (instance: {INSTANCE_ID})")
+        logger.info(f"[Scheduler] STRICT MODE ENABLED - Only TODAY's events will be processed")
+
+        # CRITICAL: Immediately expire ALL past events on startup
+        # This prevents any old events from being sent after a restart
+        db = SessionLocal()
+        try:
+            now_ist = get_ist_now()
+            today = now_ist.date()
+            expired_count = auto_expire_past_events(db, today)
+            if expired_count > 0:
+                logger.warning(f"[STARTUP] Expired {expired_count} past events - these will NOT be sent")
+            else:
+                logger.info("[STARTUP] No past events to expire - database is clean")
+        except Exception as e:
+            logger.error(f"[STARTUP] Error expiring past events: {e}")
+        finally:
+            db.close()
+
         scheduler_running.set()
 
         with scheduler_thread_lock:
@@ -331,7 +452,7 @@ def startup_event():
             )
             scheduler_thread_ref.start()
 
-        logger.info("[Scheduler] Started successfully")
+        logger.info("[Scheduler] Started successfully in STRICT MODE")
     except Exception as e:
         logger.error(f"[Scheduler] Error starting: {e}")
         import traceback
@@ -379,17 +500,32 @@ def create_scheduled_event(
         if not event_dict.get('date') or not event_dict.get('time'):
             raise HTTPException(status_code=400, detail="Both date and time are required for scheduling")
 
-        # Check if the scheduled time is in the past
+        # STRICT VALIDATION: Reject events scheduled for past dates
         now_ist = get_ist_now()
-        scheduled_datetime = datetime.combine(event_dict['date'], event_dict['time'])
-        scheduled_datetime_ist = IST.localize(scheduled_datetime)
+        today = now_ist.date()
+        scheduled_date = event_dict['date']
 
-        if scheduled_datetime_ist < now_ist:
-            # Allow events scheduled for up to 5 minutes in the past (in case of minor clock differences)
+        # REJECT if scheduled for a past date (not today)
+        if scheduled_date < today:
+            logger.error(f"[REJECTED] Attempted to schedule event for past date: {scheduled_date} (today: {today})")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot schedule events for past dates. Scheduled: {scheduled_date}, Today: {today}"
+            )
+
+        # For today's date, check if time has already passed
+        if scheduled_date == today:
+            scheduled_datetime = datetime.combine(event_dict['date'], event_dict['time'])
+            scheduled_datetime_ist = IST.localize(scheduled_datetime)
+
+            # Allow 5 minute grace period for minor clock differences
             grace_period = timedelta(minutes=5)
             if scheduled_datetime_ist < now_ist - grace_period:
-                logger.warning(f"Event scheduled for past time: {scheduled_datetime_ist} (current: {now_ist})")
-                # Still allow it - it will be processed immediately
+                logger.error(f"[REJECTED] Attempted to schedule event for past time today: {scheduled_datetime_ist} (current: {now_ist})")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot schedule events for past times. Scheduled: {scheduled_datetime_ist.strftime('%H:%M')}, Current: {now_ist.strftime('%H:%M')}"
+                )
 
         # Ensure value is properly formatted
         if isinstance(event_dict.get('value'), str):
@@ -669,6 +805,8 @@ def scheduler_health(db: orm.Session = Depends(get_db)):
         pending_count = db.query(ScheduledEvent).filter(ScheduledEvent.status == "pending").count()
         processing_count = db.query(ScheduledEvent).filter(ScheduledEvent.status == "processing").count()
         failed_count = db.query(ScheduledEvent).filter(ScheduledEvent.status == "failed").count()
+        expired_count = db.query(ScheduledEvent).filter(ScheduledEvent.status == "expired").count()
+        completed_count = db.query(ScheduledEvent).filter(ScheduledEvent.status == "completed").count()
 
         # Check for stuck processing events
         cutoff_time = datetime.utcnow() - timedelta(minutes=STALE_PROCESSING_TIMEOUT_MINUTES)
@@ -676,25 +814,43 @@ def scheduler_health(db: orm.Session = Depends(get_db)):
             ScheduledEvent.status == "processing",
             ScheduledEvent.updated_at < cutoff_time
         ).count()
+
+        # Check for old pending events that will be expired
+        now_ist = get_ist_now()
+        oldest_allowed_date = (now_ist - timedelta(days=MAX_EVENT_AGE_DAYS)).date()
+        old_pending_count = db.query(ScheduledEvent).filter(
+            ScheduledEvent.status == "pending",
+            ScheduledEvent.date < oldest_allowed_date
+        ).count()
     except Exception as e:
         logger.error(f"Error getting health stats: {e}")
-        pending_count = processing_count = failed_count = stuck_count = -1
+        pending_count = processing_count = failed_count = stuck_count = expired_count = completed_count = old_pending_count = -1
 
     return {
         "status": "healthy" if thread_alive else "unhealthy",
+        "mode": "STRICT - Only TODAY's events are processed",
         "scheduler_running": scheduler_running.is_set(),
         "thread_alive": thread_alive,
         "was_restarted": was_restarted,
         "instance_id": INSTANCE_ID,
         "timezone": "Asia/Kolkata",
         "current_time_ist": get_ist_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "today_date": str(get_ist_now().date()),
         "polling_interval_seconds": POLLING_INTERVAL_SECONDS,
         "stale_timeout_minutes": STALE_PROCESSING_TIMEOUT_MINUTES,
         "events": {
             "pending": pending_count,
             "processing": processing_count,
+            "completed": completed_count,
             "failed": failed_count,
-            "stuck": stuck_count
+            "expired": expired_count,
+            "stuck": stuck_count,
+            "past_pending_will_expire": old_pending_count
+        },
+        "protection": {
+            "past_events": "Auto-expired on every scheduler cycle",
+            "past_date_scheduling": "REJECTED at creation time",
+            "past_time_scheduling": "REJECTED at creation time (5min grace)"
         }
     }
 
@@ -815,3 +971,118 @@ def retry_all_failed_events(
         db.rollback()
         logger.error(f"Error resetting failed events: {e}")
         raise HTTPException(status_code=500, detail="Failed to reset events")
+
+
+@router.post("/scheduler/cleanup")
+def cleanup_old_events(
+    days_to_keep: int = 30,
+    x_tenant_id: Optional[str] = Header(None),
+    db: orm.Session = Depends(get_db)
+):
+    """
+    Clean up old completed, failed, and expired events.
+    Keeps events from the last 'days_to_keep' days (default 30).
+    """
+    try:
+        cutoff_date = datetime.utcnow() - timedelta(days=days_to_keep)
+
+        # Build query for deletable events
+        query = db.query(ScheduledEvent).filter(
+            ScheduledEvent.status.in_(["completed", "failed", "expired"]),
+            ScheduledEvent.updated_at < cutoff_date
+        )
+
+        if x_tenant_id:
+            query = query.filter(ScheduledEvent.tenant_id == x_tenant_id)
+
+        # Count before deletion
+        delete_count = query.count()
+
+        if delete_count > 0:
+            query.delete(synchronize_session=False)
+            db.commit()
+            logger.info(f"[Cleanup] Deleted {delete_count} old events (older than {days_to_keep} days)")
+
+        return {
+            "message": f"Cleaned up {delete_count} old events",
+            "deleted_count": delete_count,
+            "cutoff_date": cutoff_date.strftime("%Y-%m-%d"),
+            "instance_id": INSTANCE_ID
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error cleaning up events: {e}")
+        raise HTTPException(status_code=500, detail="Failed to clean up events")
+
+
+@router.post("/scheduler/expire-old")
+def expire_old_events_endpoint(db: orm.Session = Depends(get_db)):
+    """Manually expire all events older than MAX_EVENT_AGE_DAYS"""
+    try:
+        expired_count = expire_old_events(db)
+        return {
+            "message": f"Expired {expired_count} old events",
+            "expired_count": expired_count,
+            "max_event_age_days": MAX_EVENT_AGE_DAYS,
+            "instance_id": INSTANCE_ID
+        }
+    except Exception as e:
+        logger.error(f"Error expiring old events: {e}")
+        raise HTTPException(status_code=500, detail="Failed to expire old events")
+
+
+@router.get("/scheduled-events/stats")
+def get_event_stats(
+    x_tenant_id: Optional[str] = Header(None),
+    db: orm.Session = Depends(get_db)
+):
+    """Get detailed statistics about scheduled events"""
+    try:
+        base_query = db.query(ScheduledEvent)
+        if x_tenant_id:
+            base_query = base_query.filter(ScheduledEvent.tenant_id == x_tenant_id)
+
+        # Get counts by status
+        stats = {
+            "pending": base_query.filter(ScheduledEvent.status == "pending").count(),
+            "processing": base_query.filter(ScheduledEvent.status == "processing").count(),
+            "completed": base_query.filter(ScheduledEvent.status == "completed").count(),
+            "failed": base_query.filter(ScheduledEvent.status == "failed").count(),
+            "expired": base_query.filter(ScheduledEvent.status == "expired").count(),
+        }
+
+        # Get oldest pending event
+        oldest_pending = base_query.filter(
+            ScheduledEvent.status == "pending"
+        ).order_by(ScheduledEvent.date, ScheduledEvent.time).first()
+
+        # Get events by date range
+        now_ist = get_ist_now()
+        today = now_ist.date()
+
+        events_today = base_query.filter(
+            ScheduledEvent.date == today,
+            ScheduledEvent.status == "pending"
+        ).count()
+
+        events_past = base_query.filter(
+            ScheduledEvent.date < today,
+            ScheduledEvent.status == "pending"
+        ).count()
+
+        return {
+            "tenant_id": x_tenant_id or "all",
+            "status_counts": stats,
+            "total": sum(stats.values()),
+            "pending_today": events_today,
+            "pending_past_dates": events_past,
+            "oldest_pending_event": {
+                "id": oldest_pending.id if oldest_pending else None,
+                "date": str(oldest_pending.date) if oldest_pending else None,
+                "time": str(oldest_pending.time) if oldest_pending else None,
+            } if oldest_pending else None,
+            "current_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S")
+        }
+    except Exception as e:
+        logger.error(f"Error getting event stats: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get event stats")
