@@ -35,7 +35,7 @@ class SmartGroupScheduler:
         logger.info(f"SMART GROUP AUTO-SYNC STARTED at {start_time}")
         logger.info("=" * 80)
 
-        db: Session = SessionLocal()
+        db = None
         stats = {
             'total_groups_processed': 0,
             'total_groups_synced': 0,
@@ -47,6 +47,7 @@ class SmartGroupScheduler:
         }
 
         try:
+            db = SessionLocal()
             # Get all groups with auto_rules enabled
             smart_groups = db.query(BroadcastGroups).filter(
                 BroadcastGroups.auto_rules.isnot(None)
@@ -129,7 +130,11 @@ class SmartGroupScheduler:
             stats['critical_error'] = str(e)
 
         finally:
-            db.close()
+            if db is not None:
+                try:
+                    db.close()
+                except Exception as close_error:
+                    logger.error(f"Error closing database connection: {close_error}")
 
         return stats
 
@@ -145,7 +150,7 @@ class SmartGroupScheduler:
         """
         logger.info(f"Starting smart group sync for tenant: {tenant_id}")
 
-        db: Session = SessionLocal()
+        db = None
         stats = {
             'tenant_id': tenant_id,
             'groups_processed': 0,
@@ -157,6 +162,7 @@ class SmartGroupScheduler:
         }
 
         try:
+            db = SessionLocal()
             # Get smart groups for this tenant
             smart_groups = db.query(BroadcastGroups).filter(
                 BroadcastGroups.tenant_id == tenant_id,
@@ -198,7 +204,11 @@ class SmartGroupScheduler:
             stats['error'] = str(e)
 
         finally:
-            db.close()
+            if db is not None:
+                try:
+                    db.close()
+                except Exception as close_error:
+                    logger.error(f"Error closing database connection: {close_error}")
 
         return stats
 

@@ -300,8 +300,9 @@ def process_due_events():
     Past events are automatically expired - they will NEVER be sent.
     This ensures only intentionally scheduled messages are delivered.
     """
-    db = SessionLocal()
+    db = None
     try:
+        db = SessionLocal()
         now_ist = get_ist_now()
         today = now_ist.date()
         current_time = now_ist.time()
@@ -354,7 +355,12 @@ def process_due_events():
         import traceback
         logger.error(f"[Scheduler] Traceback: {traceback.format_exc()}")
     finally:
-        db.close()
+        if db is not None:
+            try:
+                db.close()
+                logger.debug("[Scheduler] Database connection closed successfully")
+            except Exception as close_error:
+                logger.error(f"[Scheduler] Error closing database connection: {close_error}")
 
 
 def scheduler_loop():
@@ -428,8 +434,9 @@ def startup_event():
 
         # CRITICAL: Immediately expire ALL past events on startup
         # This prevents any old events from being sent after a restart
-        db = SessionLocal()
+        db = None
         try:
+            db = SessionLocal()
             now_ist = get_ist_now()
             today = now_ist.date()
             expired_count = auto_expire_past_events(db, today)
@@ -440,7 +447,11 @@ def startup_event():
         except Exception as e:
             logger.error(f"[STARTUP] Error expiring past events: {e}")
         finally:
-            db.close()
+            if db is not None:
+                try:
+                    db.close()
+                except Exception as close_error:
+                    logger.error(f"[STARTUP] Error closing database connection: {close_error}")
 
         scheduler_running.set()
 

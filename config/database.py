@@ -1,5 +1,6 @@
 import os
 import logging
+import socket
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.pool import QueuePool, NullPool
@@ -20,11 +21,43 @@ logger = logging.getLogger(__name__)
 # - Better performance under high load
 # =============================================================================
 
-# DEFAULT TO TRUE - PgBouncer enabled by default for production stability
-USE_PGBOUNCER = os.environ.get('USE_PGBOUNCER', 'true').lower() == 'true'
-DB_PORT = '6432' if USE_PGBOUNCER else '5432'
+DB_HOST = "nurenaistore.postgres.database.azure.com"
+DB_USER = "nurenai"
+DB_PASSWORD = "Biz1nurenWar*"
+DB_NAME = "nurenpostgres_Whatsapp"
 
-DATABASE_URL = f"postgresql://nurenai:Biz1nurenWar*@nurenaistore.postgres.database.azure.com:{DB_PORT}/nurenpostgres_Whatsapp"
+def check_port_available(host, port, timeout=3):
+    """Check if a port is reachable on the given host"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except Exception as e:
+        logger.warning(f"Port check failed for {host}:{port} - {e}")
+        return False
+
+# CRITICAL: PgBouncer must be enabled in Azure Portal for port 6432 to work
+# Azure Portal → PostgreSQL → Server Parameters → pgbouncer.enabled = true
+USE_PGBOUNCER_ENV = os.environ.get('USE_PGBOUNCER', 'false').lower() == 'true'
+
+# Auto-detect working port with fallback
+if USE_PGBOUNCER_ENV:
+    # Try PgBouncer port first, fallback to direct if not available
+    if check_port_available(DB_HOST, 6432):
+        USE_PGBOUNCER = True
+        DB_PORT = '6432'
+        logger.info("PgBouncer port 6432 is available - using PgBouncer mode")
+    else:
+        logger.warning("PgBouncer port 6432 is NOT available - falling back to direct port 5432")
+        USE_PGBOUNCER = False
+        DB_PORT = '5432'
+else:
+    USE_PGBOUNCER = False
+    DB_PORT = '5432'
+
+DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 logger.info(f"Database mode: {'PgBouncer (port 6432)' if USE_PGBOUNCER else 'Direct (port 5432)'}")
 
@@ -51,31 +84,28 @@ if USE_PGBOUNCER:
     logger.info("✅ Using PgBouncer mode (NullPool) - Connection pooling handled by Azure")
 else:
     # ==========================================================================
-    # Direct Connection Mode (Fallback - NOT recommended for production)
+    # Direct Connection Mode - Minimal pool to prevent connection exhaustion
     # ==========================================================================
-    # Conservative pool settings to prevent connection exhaustion
+    # VERY conservative pool settings - Azure PostgreSQL has limited connections
     engine = create_engine(
         DATABASE_URL,
         poolclass=QueuePool,
-        pool_size=2,
-        max_overflow=3,
-        pool_timeout=10,
-        pool_recycle=300,
+        pool_size=1,       # Reduced to 1 - minimum connections
+        max_overflow=2,    # Reduced to 2 - max 3 total connections
+        pool_timeout=30,   # Wait longer for available connection
+        pool_recycle=60,   # Recycle connections every 60 seconds
         pool_pre_ping=True,
         connect_args={
             "sslmode": "require",
             "connect_timeout": 10,
             "application_name": "FastAPI_Direct",
-            "keepalives_idle": 300,
-            "keepalives_interval": 30,
-            "keepalives_count": 3
         },
         echo=False,
         pool_reset_on_return='rollback',
         isolation_level="READ_COMMITTED",
         future=True
     )
-    logger.warning("⚠️ Using Direct mode (QueuePool) - Enable PgBouncer for production!")
+    logger.warning("⚠️ Using Direct mode (minimal pool) - Enable PgBouncer in Azure for better performance!")
 
 # Create a session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
