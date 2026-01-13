@@ -16,16 +16,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Upload artifact for deployment jobs
+      - name: Upload artifact for deployment (no venv - let Azure/Oryx build it)
         uses: actions/upload-artifact@v4
         with:
           name: python-app
           path: |
             .
             !.git/
+            !.gitignore
             !__pycache__/
             !*.pyc
             !.env
+            !venv/
+            !antenv/
+            !.venv/
+            !env/
 
   deploy:
     runs-on: ubuntu-latest
