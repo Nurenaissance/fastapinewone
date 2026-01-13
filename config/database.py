@@ -1,52 +1,71 @@
 import os
 import logging
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.pool import QueuePool, NullPool
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Set USE_PGBOUNCER=true in environment if PgBouncer is enabled on Azure
-USE_PGBOUNCER = os.environ.get('USE_PGBOUNCER', 'false').lower() == 'true'
+# =============================================================================
+# PERMANENT FIX: PgBouncer Connection Pooling (RECOMMENDED)
+# =============================================================================
+# Azure PostgreSQL Flexible Server has built-in PgBouncer on port 6432
+# This MUST be enabled in Azure Portal:
+#   Azure Portal → PostgreSQL → Server Parameters → pgbouncer.enabled = true
+#
+# Benefits:
+# - Eliminates "remaining connection slots" errors permanently
+# - Supports 1000s of app connections with only ~100 DB connections
+# - Better performance under high load
+# =============================================================================
+
+# DEFAULT TO TRUE - PgBouncer enabled by default for production stability
+USE_PGBOUNCER = os.environ.get('USE_PGBOUNCER', 'true').lower() == 'true'
 DB_PORT = '6432' if USE_PGBOUNCER else '5432'
 
 DATABASE_URL = f"postgresql://nurenai:Biz1nurenWar*@nurenaistore.postgres.database.azure.com:{DB_PORT}/nurenpostgres_Whatsapp"
 
-# Set up SQLAlchemy engine with connection pool configuration
-# When using PgBouncer, use NullPool (PgBouncer handles pooling)
-# Without PgBouncer, use QueuePool with conservative settings
+logger.info(f"Database mode: {'PgBouncer (port 6432)' if USE_PGBOUNCER else 'Direct (port 5432)'}")
 
 if USE_PGBOUNCER:
-    # PgBouncer handles connection pooling - use NullPool
+    # ==========================================================================
+    # PgBouncer Mode (RECOMMENDED for production)
+    # ==========================================================================
+    # NullPool: No application-level pooling - PgBouncer handles everything
+    # This is the correct configuration for PgBouncer transaction pooling
     engine = create_engine(
         DATABASE_URL,
-        poolclass=NullPool,  # No application-level pooling (PgBouncer handles it)
+        poolclass=NullPool,
         connect_args={
             "sslmode": "require",
-            "connect_timeout": 30,
+            "connect_timeout": 10,
             "application_name": "FastAPI_PgBouncer",
+            # Statement timeout to prevent long-running queries
+            "options": "-c statement_timeout=30000",
         },
         echo=False,
         isolation_level="READ_COMMITTED",
         future=True
     )
-    logger.info("Using PgBouncer mode (NullPool)")
+    logger.info("✅ Using PgBouncer mode (NullPool) - Connection pooling handled by Azure")
 else:
-    # General Purpose D2s_v3 tier - can use larger pool
-    # Allocate ~30 connections for FastAPI (pool_size=5 * workers + overflow)
+    # ==========================================================================
+    # Direct Connection Mode (Fallback - NOT recommended for production)
+    # ==========================================================================
+    # Conservative pool settings to prevent connection exhaustion
     engine = create_engine(
         DATABASE_URL,
         poolclass=QueuePool,
-        pool_size=5,                 # 5 connections per worker (increased from 2)
-        max_overflow=5,              # 5 overflow (max 10 per worker)
-        pool_timeout=30,             # Fail faster if no connections
-        pool_recycle=1800,           # Recycle after 30 minutes
-        pool_pre_ping=True,          # Validate connections before use
+        pool_size=2,
+        max_overflow=3,
+        pool_timeout=10,
+        pool_recycle=300,
+        pool_pre_ping=True,
         connect_args={
             "sslmode": "require",
-            "connect_timeout": 30,
-            "application_name": "FastAPI_Scheduler",
+            "connect_timeout": 10,
+            "application_name": "FastAPI_Direct",
             "keepalives_idle": 300,
             "keepalives_interval": 30,
             "keepalives_count": 3
@@ -56,7 +75,7 @@ else:
         isolation_level="READ_COMMITTED",
         future=True
     )
-    logger.info("Using QueuePool mode - General Purpose tier (pool_size=5, max_overflow=5)")
+    logger.warning("⚠️ Using Direct mode (QueuePool) - Enable PgBouncer for production!")
 
 # Create a session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

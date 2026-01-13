@@ -1,12 +1,26 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from datetime import date as dt_date, time as dt_time, datetime as dt_datetime
 from typing import Optional, Dict, Any
 
 class ScheduledEventBase(BaseModel):
     type: str
-    date: Optional[dt_date] = None
-    time: Optional[dt_time] = None
+    date: dt_date  # Required - when to send the message
+    time: dt_time  # Required - what time to send
     value: Dict[str, Any]
+
+    @field_validator('date')
+    @classmethod
+    def validate_date(cls, v):
+        if v is None:
+            raise ValueError('date is required for scheduling')
+        return v
+
+    @field_validator('time')
+    @classmethod
+    def validate_time(cls, v):
+        if v is None:
+            raise ValueError('time is required for scheduling')
+        return v
 
 class ScheduledEventCreate(ScheduledEventBase):
     pass

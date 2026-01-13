@@ -263,3 +263,53 @@ async def check_resources():
         }
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/admin/db-status")
+async def database_status():
+    """
+    Monitor database connection status.
+    Use this endpoint to check if connections are healthy.
+    """
+    from config.database import get_pool_status, USE_PGBOUNCER, engine
+    from sqlalchemy import text
+
+    try:
+        # Test actual database connectivity
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT 1")).fetchone()
+            db_connected = result is not None
+
+            # Get active connections count from PostgreSQL
+            active_conns = conn.execute(text(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = 'nurenpostgres_Whatsapp'"
+            )).scalar()
+    except Exception as e:
+        db_connected = False
+        active_conns = -1
+        logger.error(f"Database status check failed: {e}")
+
+    pool_status = get_pool_status()
+
+    return {
+        "database_connected": db_connected,
+        "pgbouncer_enabled": USE_PGBOUNCER,
+        "connection_port": "6432 (PgBouncer)" if USE_PGBOUNCER else "5432 (Direct)",
+        "active_db_connections": active_conns,
+        "pool_status": pool_status,
+        "recommendation": "Healthy" if db_connected else "Check database connectivity"
+    }
+
+@app.post("/admin/db-reset")
+async def reset_database_connections():
+    """
+    Emergency endpoint to reset all database connections.
+    Use this if you encounter connection exhaustion issues.
+    """
+    from config.database import force_close_all_connections
+
+    try:
+        force_close_all_connections()
+        return {"message": "All database connections reset successfully"}
+    except Exception as e:
+        logger.error(f"Database reset failed: {e}")
+        return {"error": str(e)}
