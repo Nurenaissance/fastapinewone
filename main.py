@@ -105,6 +105,31 @@ def is_valid_service_key(api_key: str) -> tuple[bool, str]:
             return True, service_name
     return False, None
 
+# ------------- Trusted Sources Configuration -------------
+BYPASS_AUTH_ORIGINS = [
+    'https://nurenaiautomatic-b7hmdnb4fzbpbtbh.canadacentral-01.azurewebsites.net'
+]
+TRUSTED_SOURCES = ['nurenaiautomatic']
+
+def is_trusted_request(request: Request) -> bool:
+    """Check if request is from a trusted source via Origin, Referer, or X-Trusted-Source header"""
+    # Check Origin header
+    origin = request.headers.get("origin", "")
+    if any(origin.startswith(allowed) for allowed in BYPASS_AUTH_ORIGINS):
+        return True
+
+    # Check Referer header
+    referer = request.headers.get("referer", "")
+    if any(referer.startswith(allowed) for allowed in BYPASS_AUTH_ORIGINS):
+        return True
+
+    # Check custom X-Trusted-Source header
+    trusted_source = request.headers.get("x-trusted-source", "")
+    if trusted_source in TRUSTED_SOURCES:
+        return True
+
+    return False
+
 # ------------- Dual Authentication Middleware (JWT + Service Keys) -------------
 async def jwt_middleware(request: Request, call_next):
     """
@@ -121,20 +146,14 @@ async def jwt_middleware(request: Request, call_next):
         "/admin/resources",
     }
 
-    # Origins that bypass authentication (trusted internal services)
-    BYPASS_AUTH_ORIGINS = [
-        'https://nurenaiautomatic-b7hmdnb4fzbpbtbh.canadacentral-01.azurewebsites.net'
-    ]
-
     # 1. Allow public routes
     if request.url.path in PUBLIC_PATHS or request.url.path.startswith("/docs"):
         return await call_next(request)
 
     # 2. Allow requests from trusted origins (bypass auth)
-    origin = request.headers.get("origin") or request.headers.get("referer", "")
-    if any(origin.startswith(allowed) for allowed in BYPASS_AUTH_ORIGINS):
+    if is_trusted_request(request):
         request.state.is_trusted_origin = True
-        logger.info(f"✅ Request from trusted origin: {origin}")
+        logger.info("✅ Request from trusted source - bypassing auth")
         return await call_next(request)
 
     # 3. Check for Service API Key (X-Service-Key header)
@@ -185,16 +204,31 @@ async def jwt_middleware(request: Request, call_next):
         return await call_next(request)
 
     except ExpiredSignatureError:
+        # Allow trusted sources even with expired token
+        if is_trusted_request(request):
+            request.state.is_trusted_origin = True
+            logger.info("✅ Trusted source with expired token - allowing request")
+            return await call_next(request)
         return JSONResponse(
             status_code=401,
             content={"error": "token_expired", "message": "Access token has expired"}
         )
     except InvalidTokenError:
+        # Allow trusted sources even with invalid token
+        if is_trusted_request(request):
+            request.state.is_trusted_origin = True
+            logger.info("✅ Trusted source with invalid token - allowing request")
+            return await call_next(request)
         return JSONResponse(
             status_code=401,
             content={"error": "invalid_token", "message": "Invalid token"}
         )
     except Exception as e:
+        # Allow trusted sources even on auth errors
+        if is_trusted_request(request):
+            request.state.is_trusted_origin = True
+            logger.info("✅ Trusted source with auth error - allowing request")
+            return await call_next(request)
         logger.error(f"JWT validation error: {str(e)}")
         return JSONResponse(
             status_code=401,
