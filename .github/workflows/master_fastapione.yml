@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -16,36 +16,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Upload artifact for deployment (no venv - let Azure/Oryx build it)
-        uses: actions/upload-artifact@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          name: python-app
-          path: |
-            .
-            !.git/
-            !.gitignore
-            !__pycache__/
-            !*.pyc
-            !.env
-            !venv/
-            !antenv/
-            !.venv/
-            !env/
+          python-version: '3.11'
 
-  deploy:
-    runs-on: ubuntu-latest
-    needs: build
+      - name: Install dependencies to local packages directory
+        run: |
+          pip install -r requirements.txt --target=".python_packages/lib/site-packages"
 
-    steps:
-      - name: Download artifact from build job
-        uses: actions/download-artifact@v4
-        with:
-          name: python-app
+      - name: Zip deployment package
+        run: |
+          zip -r deploy.zip . -x ".git/*" -x "__pycache__/*" -x "*.pyc" -x ".env" -x "venv/*" -x "antenv/*"
 
-      - name: 'Deploy to Azure Web App'
+      - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
-        id: deploy-to-webapp
         with:
           app-name: 'fastapione'
           slot-name: 'Production'
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_3FA1B3E60E24409480DC4812EF09D1EE }}
+          package: deploy.zip

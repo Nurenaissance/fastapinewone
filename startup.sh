@@ -1,18 +1,10 @@
 #!/bin/bash
 cd /home/site/wwwroot
 
-# Create venv if it doesn't exist (on Azure, not from deployment)
-if [ ! -d "antenv" ]; then
-    python -m venv antenv
-fi
+# Add packaged dependencies to Python path
+export PYTHONPATH="/home/site/wwwroot/.python_packages/lib/site-packages:$PYTHONPATH"
 
-# Activate venv
-source antenv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt --quiet --disable-pip-version-check
-
-# Start the application
+# Start gunicorn with uvicorn workers
 gunicorn main:app \
     --workers 2 \
     --worker-class uvicorn.workers.UvicornWorker \

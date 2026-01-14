@@ -121,11 +121,23 @@ async def jwt_middleware(request: Request, call_next):
         "/admin/resources",
     }
 
+    # Origins that bypass authentication (trusted internal services)
+    BYPASS_AUTH_ORIGINS = [
+        'https://nurenaiautomatic-b7hmdnb4fzbpbtbh.canadacentral-01.azurewebsites.net'
+    ]
+
     # 1. Allow public routes
     if request.url.path in PUBLIC_PATHS or request.url.path.startswith("/docs"):
         return await call_next(request)
 
-    # 2. Check for Service API Key (X-Service-Key header)
+    # 2. Allow requests from trusted origins (bypass auth)
+    origin = request.headers.get("origin") or request.headers.get("referer", "")
+    if any(origin.startswith(allowed) for allowed in BYPASS_AUTH_ORIGINS):
+        request.state.is_trusted_origin = True
+        logger.info(f"✅ Request from trusted origin: {origin}")
+        return await call_next(request)
+
+    # 3. Check for Service API Key (X-Service-Key header)
     service_key = request.headers.get("X-Service-Key")
 
     if service_key:
