@@ -71,26 +71,37 @@ def reset_cache(bpid: str = Header(default=None)):
 def get_whatsapp_tenant_data(
     x_tenant_id: Optional[str] = Header(None),
     bpid: Optional[str] = Header(None),
+    x_service_key: Optional[str] = Header(None),
     db: orm.Session = Depends(get_db)
 ):
+    """
+    Get WhatsApp tenant data
+
+    Security:
+    - Frontend calls (no X-Service-Key): Returns data WITHOUT access_token
+    - Backend calls (with X-Service-Key): Returns data WITH access_token
+    """
     try:
         logger.info(f"Request - Tenant ID: {x_tenant_id}, BPID: {bpid}")
 
         # Resolve tenant_id and bpid with optimized caching
         tenant_id, bpid = _resolve_tenant_and_bpid(x_tenant_id, bpid, db)
 
-        # Use bpid-based cache key for consistency
-        cache_key = f"whatsapp_tenant:{bpid}"
+        # Check if this is a backend-to-backend call
+        is_backend_call = bool(x_service_key)
+
+        # Use different cache keys for backend vs frontend calls
+        cache_key = f"whatsapp_tenant:{bpid}:backend" if is_backend_call else f"whatsapp_tenant:{bpid}:frontend"
         cached_response = get_cache(cache_key)
-        
+
         if cached_response:
-            logger.info("[CACHE HIT] Returning cached response")
+            logger.info(f"[CACHE HIT] Returning cached response (backend={is_backend_call})")
             return cached_response
 
         logger.info(f"[CACHE MISS] Fetching data for key: {cache_key}")
 
         # Optimized database queries with eager loading
-        response_data = _fetch_tenant_data_optimized(tenant_id, bpid, db)
+        response_data = _fetch_tenant_data_optimized(tenant_id, bpid, db, include_access_token=is_backend_call)
 
         # Cache the response
         set_cache(cache_key, response_data)
@@ -155,14 +166,22 @@ def _resolve_tenant_and_bpid(x_tenant_id: Optional[str], bpid: Optional[str], db
     else:
         raise HTTPException(status_code=400, detail="Either X-Tenant-Id or BPID header must be provided")
 
-def _fetch_tenant_data_optimized(tenant_id: str, bpid: str, db: orm.Session):
-    """Optimized data fetching with reduced queries"""
-    
+def _fetch_tenant_data_optimized(tenant_id: str, bpid: str, db: orm.Session, include_access_token: bool = False):
+    """
+    Optimized data fetching with reduced queries
+
+    Args:
+        tenant_id: Tenant ID
+        bpid: Business Phone Number ID
+        db: Database session
+        include_access_token: If True, includes access_token in response (for backend calls only)
+    """
+
     # Single query for WhatsApp data
     whatsapp_data = db.query(WhatsappTenantData)\
                       .filter(WhatsappTenantData.business_phone_number_id == bpid)\
                       .all()
-    
+
     if not whatsapp_data:
         raise HTTPException(status_code=404, detail="WhatsappTenantData not found")
 
@@ -170,7 +189,7 @@ def _fetch_tenant_data_optimized(tenant_id: str, bpid: str, db: orm.Session):
     tenant_data = db.query(Tenant)\
                .filter(Tenant.id == tenant_id)\
                .first()
-    
+
     if not tenant_data:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
@@ -185,8 +204,22 @@ def _fetch_tenant_data_optimized(tenant_id: str, bpid: str, db: orm.Session):
         for nt in node_templates
     ]
 
+    # SECURITY: Remove access_token from response for frontend calls
+    # Access tokens should never be exposed to client-side code
+    # Backend-to-backend calls (with X-Service-Key header) can receive the token
+    whatsapp_data_safe = []
+    for data in whatsapp_data:
+        data_dict = jsonable_encoder(data)
+
+        # Remove sensitive fields for frontend calls
+        if not include_access_token:
+            data_dict.pop('access_token', None)
+            logger.info(f"🔒 SECURITY: Removed access_token from response (frontend call)")
+
+        whatsapp_data_safe.append(data_dict)
+
     return {
-        "whatsapp_data": jsonable_encoder(whatsapp_data),
+        "whatsapp_data": whatsapp_data_safe,
         "agents": jsonable_encoder(tenant_data.agents),
         "triggers": node_template_data
     }
@@ -1958,3 +1991,84 @@ async def trigger_tenant_sync(
     except Exception as e:
         logger.error(f"Error in tenant sync: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# =====================================================
+# FACEBOOK GRAPH API PROXY ENDPOINT (SECURE)
+# =====================================================
+
+@router.get("/template-analytics")
+async def get_template_analytics(
+    template_id: str,
+    start: int,
+    end: int,
+    granularity: str = "daily",
+    metric_types: str = "cost,clicked,delivered,read,sent",
+    db: orm.Session = Depends(get_db),
+    x_tenant_id: Optional[str] = Header(None)
+):
+    """
+    Secure proxy endpoint for Facebook Graph API template analytics
+    This prevents exposing access_token to the frontend
+
+    Args:
+        template_id: WhatsApp template ID
+        start: Start date (Unix timestamp)
+        end: End date (Unix timestamp)
+        granularity: Data granularity (default: daily)
+        metric_types: Comma-separated metrics to fetch
+    """
+    if not x_tenant_id:
+        raise HTTPException(status_code=400, detail="Missing X-Tenant-Id header")
+
+    try:
+        # Get tenant's WhatsApp data with access_token (backend-only)
+        whatsapp_data = db.query(WhatsappTenantData).filter(
+            WhatsappTenantData.tenant_id == x_tenant_id
+        ).first()
+
+        if not whatsapp_data:
+            raise HTTPException(status_code=404, detail="WhatsApp account not found for tenant")
+
+        if not whatsapp_data.access_token:
+            raise HTTPException(status_code=400, detail="No access token configured")
+
+        if not whatsapp_data.business_account_id:
+            raise HTTPException(status_code=400, detail="No WhatsApp Business Account ID found")
+
+        # Make request to Facebook Graph API
+        api_url = f"https://graph.facebook.com/v22.0/{whatsapp_data.business_account_id}/template_analytics"
+
+        logger.info(f"Fetching template analytics for tenant {x_tenant_id}, template {template_id}")
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                api_url,
+                params={
+                    "access_token": whatsapp_data.access_token,
+                    "start": start,
+                    "end": end,
+                    "granularity": granularity,
+                    "metric_types": metric_types,
+                    "template_ids": f"[{template_id}]"
+                }
+            )
+
+            if response.status_code != 200:
+                error_data = response.json() if response.content else {}
+                error_message = error_data.get('error', {}).get('message', 'Unknown error')
+                logger.error(f"Facebook API error: {response.status_code} - {error_message}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Facebook API error: {error_message}"
+                )
+
+            return response.json()
+
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        logger.error("Timeout while fetching template analytics from Facebook API")
+        raise HTTPException(status_code=504, detail="Request timeout")
+    except Exception as e:
+        logger.error(f"Error fetching template analytics: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch analytics: {str(e)}")

@@ -110,9 +110,20 @@ BYPASS_AUTH_ORIGINS = [
     'https://nurenaiautomatic-b7hmdnb4fzbpbtbh.canadacentral-01.azurewebsites.net'
 ]
 TRUSTED_SOURCES = ['nurenaiautomatic']
+N8N_API_KEY = 'n8n-nuren-2026'
 
 def is_trusted_request(request: Request) -> bool:
-    """Check if request is from a trusted source via Origin, Referer, or X-Trusted-Source header"""
+    """Check if request is from a trusted source via multiple methods"""
+    # Check simple X-Api-Key header (easiest for n8n)
+    api_key = request.headers.get("x-api-key", "")
+    if api_key == N8N_API_KEY:
+        return True
+
+    # Check query parameter ?api_key=xxx
+    api_key_param = request.query_params.get("api_key", "")
+    if api_key_param == N8N_API_KEY:
+        return True
+
     # Check Origin header
     origin = request.headers.get("origin", "")
     if any(origin.startswith(allowed) for allowed in BYPASS_AUTH_ORIGINS):
