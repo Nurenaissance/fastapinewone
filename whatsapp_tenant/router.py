@@ -45,7 +45,8 @@ def reset_cache(bpid: str = Header(default=None)):
         raise HTTPException(status_code=400, detail="bpid header must be provided.")
 
     keys_to_clear = [
-        f"whatsapp_tenant:{bpid}",
+        f"whatsapp_tenant:{bpid}:frontend",
+        f"whatsapp_tenant:{bpid}:backend",
         f"tenant_to_bpid:*",
         f"bpid_to_tenant:{bpid}",
         f"status_data:*"
@@ -256,7 +257,8 @@ async def update_whatsapp_tenant_data(
         bpid = whatsapp_data[0].business_phone_number_id
         with cache_lock:
             cache_keys_to_clear = [
-                f"whatsapp_tenant:{bpid}",
+                f"whatsapp_tenant:{bpid}:frontend",
+                f"whatsapp_tenant:{bpid}:backend",
                 f"tenant_to_bpid:{x_tenant_id}",
                 f"bpid_to_tenant:{bpid}"
             ]
