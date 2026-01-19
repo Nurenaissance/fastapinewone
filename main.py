@@ -8,6 +8,7 @@ import conversations.router, emails, notifications.router
 import broadcast_analytics.router
 import catalog.router
 import flowsAPI.router
+import mcp_tools.router
 import logging
 import os
 from dotenv import load_dotenv
@@ -270,6 +271,7 @@ app.include_router(notifications.router.router)
 app.include_router(flowsAPI.router.router)
 app.include_router(catalog.router.router)
 app.include_router(broadcast_analytics.router.router)
+app.include_router(mcp_tools.router.router)
 
 # ------------- Health + debug endpoints -------------
 @app.get("/health")
