@@ -13,7 +13,6 @@ from .group_service import GroupService
 from contacts.models import Contact
 from datetime import timedelta
 import asyncio
-import aiohttp
 from uuid import uuid4
 from sqlalchemy.exc import IntegrityError
 from fastapi.encoders import jsonable_encoder
@@ -520,14 +519,13 @@ async def set_status(request: Request, db: orm.Session = Depends(get_db)):
         logger.error(f"Error in set_status: {str(e)}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred")
 
-# Async helper for external API calls
-async def make_async_request(session: aiohttp.ClientSession, method: str, url: str, timeout: int = 30, **kwargs):
-    """Helper function for async HTTP requests with timeout"""
+# Async helper for external API calls using httpx
+async def make_async_request(client: httpx.AsyncClient, method: str, url: str, timeout: int = 30, **kwargs):
+    """Helper function for async HTTP requests with timeout using httpx"""
     try:
-        timeout_obj = aiohttp.ClientTimeout(total=timeout)
-        async with session.request(method, url, timeout=timeout_obj, **kwargs) as response:
-            return response.status, await response.text()
-    except asyncio.TimeoutError:
+        response = await client.request(method, url, timeout=timeout, **kwargs)
+        return response.status_code, response.text
+    except httpx.TimeoutException:
         logger.error(f"Request timeout for {url}")
         return None, "Request timeout"
     except Exception as e:
@@ -733,7 +731,7 @@ async def create_contact_and_add_to_group(
     payload.contacts = list(unique_contacts_dict.values())
 
     # Use async HTTP client for better performance
-    async with aiohttp.ClientSession() as session:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         tasks = []
         for contact in payload.contacts:
             contact_payload = {
@@ -741,9 +739,9 @@ async def create_contact_and_add_to_group(
                 "name": contact.name,
                 "tenant": tenant_id
             }
-            
+
             task = make_async_request(
-                session,
+                client,
                 'POST',
                 "https://backeng4whatsapp-dxbmgpakhzf9bped.centralindia-01.azurewebsites.net/contacts/",
                 json=contact_payload,
