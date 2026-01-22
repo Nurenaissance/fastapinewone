@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request, HTTPException
 from contextlib import asynccontextmanager
 from config.database import engine, Base
 from config.middleware import add_cors_middleware
+from config.logging_config import setup_logging, get_logger
 import contacts.router, node_templates.router, scheduled_events.router, whatsapp_tenant.router
 import product.router, dynamic_models.router
 import conversations.router, emails, notifications.router
@@ -9,7 +10,6 @@ import broadcast_analytics.router
 import catalog.router
 import flowsAPI.router
 import mcp_tools.router
-import logging
 import os
 from dotenv import load_dotenv
 try:
@@ -17,7 +17,6 @@ try:
     from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
 except ImportError:
     import jwt
-    # Fallback for wrong jwt library
     ExpiredSignatureError = Exception
     InvalidTokenError = Exception
 
@@ -25,11 +24,13 @@ except ImportError:
 load_dotenv()
 
 # ------------- Logging -------------
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# Use JSON format in production (Azure) for better log aggregation
+is_production = os.getenv("ENVIRONMENT", "development") == "production"
+setup_logging(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    json_format=is_production
 )
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 newEvent = False
 
@@ -52,15 +53,20 @@ async def lifespan(app: FastAPI):
     # Initialize Smart Group Auto-Sync Scheduler
     try:
         from whatsapp_tenant.scheduler import smart_group_scheduler
-        # Start scheduler with daily sync at 2 AM
-        # You can change the time by setting SMART_GROUP_SYNC_HOUR in .env
         sync_hour = int(os.getenv('SMART_GROUP_SYNC_HOUR', '2'))
         sync_minute = int(os.getenv('SMART_GROUP_SYNC_MINUTE', '0'))
-
         smart_group_scheduler.start(hour=sync_hour, minute=sync_minute)
-        logger.info(f"✅ Smart Group Auto-Sync Scheduler started (daily at {sync_hour:02d}:{sync_minute:02d})")
+        logger.info(f"Smart Group Auto-Sync Scheduler started (daily at {sync_hour:02d}:{sync_minute:02d})")
     except Exception as e:
-        logger.error(f"❌ Failed to start Smart Group Scheduler: {str(e)}")
+        logger.error(f"Failed to start Smart Group Scheduler: {str(e)}")
+
+    # Start Broadcast Analytics Scheduler
+    try:
+        from broadcast_analytics.router import start_analytics_scheduler
+        start_analytics_scheduler()
+        logger.info("Broadcast Analytics Scheduler started")
+    except Exception as e:
+        logger.error(f"Failed to start Broadcast Analytics Scheduler: {str(e)}")
 
     yield
 
@@ -73,15 +79,21 @@ async def lifespan(app: FastAPI):
         smart_group_scheduler.stop()
         logger.info("Smart Group Scheduler stopped")
     except Exception as e:
-        logger.error(f"Error stopping scheduler: {str(e)}")
+        logger.error(f"Error stopping Smart Group scheduler: {str(e)}")
 
-    # Other cleanup
+    # Stop Broadcast Analytics Scheduler
+    try:
+        from broadcast_analytics.router import stop_analytics_scheduler
+        stop_analytics_scheduler()
+        logger.info("Broadcast Analytics Scheduler stopped")
+    except Exception as e:
+        logger.error(f"Error stopping Broadcast Analytics scheduler: {str(e)}")
+
+    # Clean up conversation resources
     try:
         from conversations.router import cleanup_resources
         cleanup_resources()
-        logger.info("Resources cleaned up successfully")
-    except ImportError:
-        logger.warning("Could not import cleanup_resources - ensure it's available in conversations.router")
+        logger.info("Conversation resources cleaned up")
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
 
@@ -276,22 +288,31 @@ app.include_router(mcp_tools.router.router)
 # ------------- Health + debug endpoints -------------
 @app.get("/health")
 def health_check():
+    from datetime import datetime
     try:
         from conversations.router import thread_pool_manager, conversation_cache
         pool_status = "healthy" if not thread_pool_manager._shutdown else "shutdown"
-        cache_entries = len(conversation_cache._cache)
+        cache_entries = len(conversation_cache)
     except Exception as e:
         pool_status = "error"
         cache_entries = -1
         logger.error(f"Health check error: {e}")
-    
+
+    # Check database connectivity
+    db_status = "unknown"
+    try:
+        from config.database import get_pool_status
+        pool_info = get_pool_status()
+        db_status = "healthy" if "error" not in pool_info else "error"
+    except Exception:
+        db_status = "error"
+
     return {
         "status": "FastApi Code is healthy",
         "thread_pool_status": pool_status,
         "cache_entries": cache_entries,
-        "timestamp": logging.Formatter().formatTime(logging.LogRecord(
-            name="", level=0, pathname="", lineno=0, msg="", args=(), exc_info=None
-        ))
+        "database_status": db_status,
+        "timestamp": datetime.now().isoformat()
     }
 
 @app.get("/")
@@ -312,13 +333,14 @@ async def manual_cleanup():
 async def check_resources():
     try:
         from conversations.router import thread_pool_manager, conversation_cache
+        from config.database import get_pool_status
         pool = thread_pool_manager._pool
         return {
             "thread_pool_shutdown": thread_pool_manager._shutdown,
-            "cache_entries": len(conversation_cache._cache),
+            "cache_entries": len(conversation_cache),
             "pool_exists": pool is not None,
             "pool_shutdown": pool._shutdown if pool else None,
-            "active_threads": pool._threads if pool and hasattr(pool, '_threads') else 0
+            "db_pool": get_pool_status()
         }
     except Exception as e:
         return {"error": str(e)}

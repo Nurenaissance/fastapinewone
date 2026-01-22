@@ -21,13 +21,75 @@ router = APIRouter()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Thread pool for parallel decryption
-thread_pool = ThreadPoolExecutor(max_workers=10)
 
-# Simple in-memory cache using LRU cache decorator
-# Set maxsize to the number of different conversation queries you expect to cache
-conversation_cache = {}
-CACHE_TTL = 60  # Cache TTL in seconds
+class ThreadPoolManager:
+    """Managed thread pool with proper cleanup support"""
+
+    def __init__(self, max_workers: int = 10):
+        self._max_workers = max_workers
+        self._pool = None
+        self._shutdown = False
+
+    @property
+    def pool(self):
+        if self._pool is None or self._shutdown:
+            self._pool = ThreadPoolExecutor(max_workers=self._max_workers)
+            self._shutdown = False
+        return self._pool
+
+    def shutdown(self, wait: bool = True):
+        if self._pool and not self._shutdown:
+            logger.info("Shutting down conversation thread pool...")
+            self._pool.shutdown(wait=wait)
+            self._shutdown = True
+            logger.info("Thread pool shutdown complete")
+
+
+class ConversationCache:
+    """Thread-safe cache with TTL and size limit"""
+
+    def __init__(self, max_size: int = 1000, ttl: int = 60):
+        self._cache = {}
+        self._max_size = max_size
+        self._ttl = ttl
+
+    def get(self, key: str):
+        entry = self._cache.get(key)
+        if entry and (time.time() - entry['timestamp']) < self._ttl:
+            return entry['data']
+        if entry:
+            del self._cache[key]
+        return None
+
+    def set(self, key: str, data):
+        # Evict oldest entries if cache is full
+        if len(self._cache) >= self._max_size:
+            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k]['timestamp'])
+            del self._cache[oldest_key]
+        self._cache[key] = {'data': data, 'timestamp': time.time()}
+
+    def clear(self):
+        self._cache.clear()
+
+    def __len__(self):
+        return len(self._cache)
+
+
+# Global instances
+thread_pool_manager = ThreadPoolManager(max_workers=10)
+conversation_cache = ConversationCache(max_size=1000, ttl=60)
+
+# For backward compatibility
+thread_pool = thread_pool_manager.pool
+CACHE_TTL = 60
+
+
+def cleanup_resources():
+    """Clean up resources - called on shutdown"""
+    logger.info("Cleaning up conversation resources...")
+    thread_pool_manager.shutdown(wait=True)
+    conversation_cache.clear()
+    logger.info("Conversation resources cleaned up")
 
 def decrypt_data(encrypted_data: bytes, key: bytes):
     try:

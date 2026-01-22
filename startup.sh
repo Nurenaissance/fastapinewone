@@ -19,10 +19,22 @@ python -c "import fastapi; print(f'FastAPI version: {fastapi.__version__}')" || 
 
 # Start gunicorn with uvicorn workers
 echo "Starting gunicorn with uvicorn workers..."
+
+# Use WEB_CONCURRENCY env var if set, otherwise default to 4 workers
+WORKERS=${WEB_CONCURRENCY:-4}
+echo "Starting with $WORKERS workers..."
+
 gunicorn main:app \
-    --workers 2 \
+    --workers $WORKERS \
     --worker-class uvicorn.workers.UvicornWorker \
     --bind 0.0.0.0:8000 \
     --timeout 120 \
+    --graceful-timeout 30 \
+    --keep-alive 65 \
+    --max-requests 1000 \
+    --max-requests-jitter 50 \
+    --preload \
     --access-logfile - \
-    --error-logfile -
+    --error-logfile - \
+    --capture-output \
+    --log-level info

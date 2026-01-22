@@ -18,25 +18,35 @@ DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NA
 
 logger.info(f"Database: {DB_HOST}:{DB_PORT}/{DB_NAME}")
 
-# Production-ready engine with conservative pooling
+# Production-ready engine with optimized pooling for Azure
+# Pool size should be: workers * 2-3, max_overflow allows burst capacity
+POOL_SIZE = int(os.environ.get('DB_POOL_SIZE', '10'))
+MAX_OVERFLOW = int(os.environ.get('DB_MAX_OVERFLOW', '20'))
+
 engine = create_engine(
     DATABASE_URL,
     poolclass=QueuePool,
-    pool_size=2,
-    max_overflow=3,
+    pool_size=POOL_SIZE,
+    max_overflow=MAX_OVERFLOW,
     pool_timeout=30,
-    pool_recycle=300,
+    pool_recycle=280,  # Slightly less than Azure's 300s idle timeout
     pool_pre_ping=True,
     connect_args={
         "sslmode": "require",
         "connect_timeout": 30,
         "application_name": "FastAPI_Production",
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
     },
     echo=False,
     pool_reset_on_return='rollback',
     isolation_level="READ_COMMITTED",
     future=True
 )
+
+logger.info(f"Database pool configured: pool_size={POOL_SIZE}, max_overflow={MAX_OVERFLOW}")
 
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
