@@ -10,7 +10,9 @@
       "Bash(python -c \"\nfrom sqlalchemy import create_engine, text\n\n# Connect to database \\(using port 5432 direct connection\\)\nDATABASE_URL = ''postgresql://nurenai:Biz1nurenWar*@nurenaistore.postgres.database.azure.com:5432/nurenpostgres_Whatsapp''\n\nengine = create_engine\\(DATABASE_URL, connect_args={''sslmode'': ''require'', ''connect_timeout'': 30}\\)\n\nwith engine.connect\\(\\) as conn:\n    # First, count how many records exist\n    count_result = conn.execute\\(text\\(''SELECT COUNT\\(*\\) FROM scheduled_events''\\)\\)\n    count = count_result.scalar\\(\\)\n    print\\(f''Found {count} scheduled events in database''\\)\n    \n    # Show breakdown by status\n    status_result = conn.execute\\(text\\(''SELECT status, COUNT\\(*\\) FROM scheduled_events GROUP BY status''\\)\\)\n    print\\(''Breakdown by status:''\\)\n    for row in status_result:\n        print\\(f''  {row[0]}: {row[1]}''\\)\n    \n    # Delete all scheduled events\n    delete_result = conn.execute\\(text\\(''DELETE FROM scheduled_events''\\)\\)\n    conn.commit\\(\\)\n    print\\(f''Deleted {delete_result.rowcount} scheduled events''\\)\n    \n    # Verify deletion\n    verify_result = conn.execute\\(text\\(''SELECT COUNT\\(*\\) FROM scheduled_events''\\)\\)\n    remaining = verify_result.scalar\\(\\)\n    print\\(f''Remaining scheduled events: {remaining}''\\)\n\")",
       "Bash(git commit:*)",
       "Bash(find:*)",
-      "Bash(python -c:*)"
+      "Bash(python -c:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:fastapione.scm.azurewebsites.net)"
     ]
   }
 }

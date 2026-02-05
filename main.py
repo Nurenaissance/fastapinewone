@@ -168,6 +168,7 @@ async def jwt_middleware(request: Request, call_next):
         "/",
         "/admin/cleanup",
         "/admin/resources",
+        "/contacts/cleanup-duplicates",
     }
 
     # 1. Allow public routes

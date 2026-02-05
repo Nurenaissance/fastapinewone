@@ -4,11 +4,14 @@ from config.database import get_db
 from .models import Contact
 from whatsapp_tenant.models import WhatsappTenantData
 from whatsapp_tenant.group_service import GroupService
-from typing import Optional
+from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
+from collections import defaultdict
 import math
+import logging
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Helper function to get tenant_id from headers (supports both X-Tenant-Id and X-Tenant-ID for backward compatibility)
 def get_tenant_id(request: Request) -> Optional[str]:
@@ -465,3 +468,204 @@ def get_contact(phone: str, request: Request, db: orm.Session = Depends(get_db))
         raise HTTPException(status_code=404, detail="Contact not found for this tenant")
 
     return contact
+
+
+def calculate_contact_richness(contact: Contact) -> int:
+    """
+    Calculate the "richness" score of a contact based on how many fields are populated.
+    Higher score = more data stored.
+    """
+    score = 0
+
+    # Basic string fields (1 point each)
+    string_fields = ['name', 'email', 'address', 'description', 'bg_name']
+    for field in string_fields:
+        value = getattr(contact, field, None)
+        if value and isinstance(value, str) and value.strip():
+            score += 1
+
+    # Timestamp fields (2 points each - more valuable for engagement tracking)
+    timestamp_fields = ['last_seen', 'last_delivered', 'last_replied']
+    for field in timestamp_fields:
+        value = getattr(contact, field, None)
+        if value is not None:
+            score += 2
+
+    # Custom fields (1 point per key in JSON)
+    if contact.customField and isinstance(contact.customField, dict):
+        # Count non-empty values in customField
+        for key, value in contact.customField.items():
+            if value is not None and value != '' and value != []:
+                score += 1
+
+    # Boolean fields that are explicitly set (1 point)
+    if contact.manual_mode is not None:
+        score += 1
+
+    # ID fields (1 point each if set)
+    if contact.bg_id:
+        score += 1
+
+    return score
+
+
+@router.post("/contacts/cleanup-duplicates")
+async def cleanup_duplicate_contacts(
+    request: Request,
+    tenant_id: Optional[str] = None,
+    dry_run: bool = False,
+    db: orm.Session = Depends(get_db)
+):
+    """
+    Delete duplicate contacts across all tenants or a specific tenant.
+    Keeps the contact with the most data (highest richness score).
+
+    Query Parameters:
+    - tenant_id: Optional. If provided, only cleanup this tenant. Otherwise, process all tenants.
+    - dry_run: If true, returns what would be deleted without actually deleting.
+
+    This is a PUBLIC endpoint for administrative cleanup operations.
+    """
+    try:
+        start_time = datetime.now()
+        logger.info(f"Starting duplicate contact cleanup (tenant_id={tenant_id}, dry_run={dry_run})")
+
+        # Build base query
+        query = db.query(Contact)
+        if tenant_id:
+            query = query.filter(Contact.tenant_id == tenant_id)
+
+        # Get all contacts
+        all_contacts = query.all()
+
+        if not all_contacts:
+            return {
+                "status": "success",
+                "message": "No contacts found",
+                "statistics": {
+                    "total_contacts_scanned": 0,
+                    "tenants_processed": 0,
+                    "duplicates_found": 0,
+                    "contacts_deleted": 0,
+                    "contacts_kept": 0
+                }
+            }
+
+        # Group contacts by tenant_id and phone number
+        contact_groups: Dict[tuple, List[Contact]] = defaultdict(list)
+        for contact in all_contacts:
+            key = (contact.tenant_id, contact.phone)
+            contact_groups[key].append(contact)
+
+        # Track statistics
+        stats = {
+            "total_contacts_scanned": len(all_contacts),
+            "tenants_processed": len(set(c.tenant_id for c in all_contacts)),
+            "duplicates_found": 0,
+            "contacts_deleted": 0,
+            "contacts_kept": 0,
+            "phone_numbers_with_duplicates": 0
+        }
+
+        # Detailed breakdown
+        deletion_details: List[Dict[str, Any]] = []
+        contacts_to_delete: List[int] = []
+
+        # Process each group
+        for (tenant, phone), contacts in contact_groups.items():
+            if len(contacts) <= 1:
+                # No duplicates
+                continue
+
+            # Found duplicates
+            stats["duplicates_found"] += len(contacts) - 1
+            stats["phone_numbers_with_duplicates"] += 1
+
+            # Calculate richness for each contact
+            contact_scores = []
+            for contact in contacts:
+                richness = calculate_contact_richness(contact)
+                contact_scores.append({
+                    "contact": contact,
+                    "richness": richness,
+                    "id": contact.id,
+                    "created_on": contact.createdOn
+                })
+
+            # Sort by richness (desc), then by creation date (older = keep)
+            contact_scores.sort(
+                key=lambda x: (x["richness"], x["created_on"] or datetime.min),
+                reverse=True
+            )
+
+            # Keep the richest (first one), delete the rest
+            keeper = contact_scores[0]
+            to_delete = contact_scores[1:]
+
+            stats["contacts_kept"] += 1
+            stats["contacts_deleted"] += len(to_delete)
+
+            # Build deletion detail
+            detail = {
+                "tenant_id": tenant,
+                "phone": phone,
+                "total_duplicates": len(contacts),
+                "kept_contact": {
+                    "id": keeper["id"],
+                    "richness_score": keeper["richness"],
+                    "name": keeper["contact"].name,
+                    "email": keeper["contact"].email,
+                    "created_on": str(keeper["created_on"]) if keeper["created_on"] else None
+                },
+                "deleted_contacts": [
+                    {
+                        "id": item["id"],
+                        "richness_score": item["richness"],
+                        "name": item["contact"].name,
+                        "email": item["contact"].email,
+                        "created_on": str(item["created_on"]) if item["created_on"] else None
+                    }
+                    for item in to_delete
+                ]
+            }
+            deletion_details.append(detail)
+
+            # Add to deletion list
+            contacts_to_delete.extend([item["id"] for item in to_delete])
+
+        # Perform actual deletion if not dry run
+        if not dry_run and contacts_to_delete:
+            deleted_count = db.query(Contact).filter(
+                Contact.id.in_(contacts_to_delete)
+            ).delete(synchronize_session=False)
+
+            db.commit()
+            logger.info(f"Deleted {deleted_count} duplicate contacts")
+        else:
+            if dry_run:
+                logger.info(f"Dry run completed. Would delete {len(contacts_to_delete)} contacts")
+
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+
+        response = {
+            "status": "success",
+            "dry_run": dry_run,
+            "message": f"{'Would delete' if dry_run else 'Deleted'} {stats['contacts_deleted']} duplicate contacts",
+            "statistics": stats,
+            "execution_time_seconds": round(duration, 2),
+            "deletion_details": deletion_details[:50]  # Limit to first 50 for response size
+        }
+
+        if len(deletion_details) > 50:
+            response["note"] = f"Showing first 50 of {len(deletion_details)} phone numbers with duplicates"
+
+        return response
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error during duplicate cleanup: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error during duplicate cleanup: {str(e)}"
+        )
