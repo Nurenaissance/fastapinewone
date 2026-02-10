@@ -57,6 +57,10 @@ class RuleTestRequest(BaseModel):
 class PromptUpdateRequest(BaseModel):
     prompt: str
 
+class AgentPromptRequest(BaseModel):
+    agent_system_prompt: Optional[str] = None
+    agent_mode_enabled: bool = False
+
 
 class WhatsappTenantDataSchema(BaseModel):
     business_phone_number_id: Optional[int]
@@ -74,6 +78,8 @@ class WhatsappTenantDataSchema(BaseModel):
     id: int
     language: Optional[str]
     prompt:Optional[str]
+    agent_system_prompt: Optional[str] = None
+    agent_mode_enabled: bool = False
 
     class Config:
         from_attributes = True

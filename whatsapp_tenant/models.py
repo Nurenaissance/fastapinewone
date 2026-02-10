@@ -40,6 +40,8 @@ class WhatsappTenantData(Base):
     multilingual =  Column(Boolean, default=False)
     prompt = Column(String(250),nullable=True)
     hop_nodes = Column(JSON, nullable=True)
+    agent_system_prompt = Column(Text, nullable=True)
+    agent_mode_enabled = Column(Boolean, default=False)
 
     tenant = relationship("Tenant", back_populates="whatsapp_chat_whatsapp_data")
 

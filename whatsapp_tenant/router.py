@@ -6,7 +6,7 @@ from .models import WhatsappTenantData, MessageStatus, BroadcastGroups, MessageS
 from models import Tenant
 from product.models import Product
 from typing import Optional, List
-from .schema import BroadcastGroupResponse, BroadcastGroupCreate, PromptUpdateRequest, BroadcastGroupContactDelete, BroadcastGroupAddContacts, BroadcastGroupMember, BroadcastGroupUpdateRules, RuleTestRequest
+from .schema import BroadcastGroupResponse, BroadcastGroupCreate, PromptUpdateRequest, AgentPromptRequest, BroadcastGroupContactDelete, BroadcastGroupAddContacts, BroadcastGroupMember, BroadcastGroupUpdateRules, RuleTestRequest
 from .crud import create_broadcast_group, get_broadcast_group, get_all_broadcast_groups
 from .rule_engine import RuleEvaluator
 from .group_service import GroupService
@@ -2072,3 +2072,84 @@ async def get_template_analytics(
     except Exception as e:
         logger.error(f"Error fetching template analytics: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to fetch analytics: {str(e)}")
+
+
+# =====================================================
+# AGENT PROMPT MANAGEMENT ENDPOINTS
+# =====================================================
+
+@router.get("/agent-prompt/fetch/")
+def get_agent_prompt(
+    x_tenant_id: Optional[str] = Header(None),
+    db: orm.Session = Depends(get_db)
+):
+    """Fetch agent system prompt and mode for a tenant."""
+    try:
+        if not x_tenant_id:
+            raise HTTPException(status_code=400, detail="Missing X-Tenant-ID header")
+
+        tenant_data = db.query(
+            WhatsappTenantData.agent_system_prompt,
+            WhatsappTenantData.agent_mode_enabled
+        ).filter_by(tenant_id=x_tenant_id).first()
+
+        if not tenant_data:
+            raise HTTPException(status_code=404, detail="Tenant data not found")
+
+        return {
+            "tenant_id": x_tenant_id,
+            "agent_system_prompt": tenant_data.agent_system_prompt,
+            "agent_mode_enabled": tenant_data.agent_mode_enabled or False
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching agent prompt for tenant {x_tenant_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching agent prompt")
+
+
+@router.post("/agent-prompt/save/")
+def save_agent_prompt(
+    data: AgentPromptRequest,
+    x_tenant_id: Optional[str] = Header(None),
+    db: orm.Session = Depends(get_db)
+):
+    """Save agent system prompt and mode for a tenant."""
+    try:
+        if not x_tenant_id:
+            raise HTTPException(status_code=400, detail="Missing X-Tenant-ID header")
+
+        tenant_data = db.query(WhatsappTenantData).filter_by(tenant_id=x_tenant_id).first()
+
+        if not tenant_data:
+            raise HTTPException(status_code=404, detail="Tenant data not found")
+
+        tenant_data.agent_system_prompt = data.agent_system_prompt
+        tenant_data.agent_mode_enabled = data.agent_mode_enabled
+        db.commit()
+
+        # Clear relevant cache entries
+        bpid = tenant_data.business_phone_number_id
+        with cache_lock:
+            cache_keys_to_clear = [
+                f"whatsapp_tenant:{bpid}:frontend",
+                f"whatsapp_tenant:{bpid}:backend",
+            ]
+            for key in cache_keys_to_clear:
+                if key in custom_cache:
+                    del custom_cache[key]
+
+        return {
+            "tenant_id": x_tenant_id,
+            "agent_system_prompt": tenant_data.agent_system_prompt,
+            "agent_mode_enabled": tenant_data.agent_mode_enabled,
+            "message": "Agent prompt saved successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error saving agent prompt for tenant {x_tenant_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error saving agent prompt")
