@@ -20,8 +20,8 @@ logger.info(f"Database: {DB_HOST}:{DB_PORT}/{DB_NAME}")
 
 # Production-ready engine with optimized pooling for Azure
 # Pool size should be: workers * 2-3, max_overflow allows burst capacity
-POOL_SIZE = int(os.environ.get('DB_POOL_SIZE', '10'))
-MAX_OVERFLOW = int(os.environ.get('DB_MAX_OVERFLOW', '20'))
+POOL_SIZE = int(os.environ.get('DB_POOL_SIZE', '5'))
+MAX_OVERFLOW = int(os.environ.get('DB_MAX_OVERFLOW', '10'))
 
 engine = create_engine(
     DATABASE_URL,
