@@ -1,35 +1,40 @@
 """
 PyTest Configuration for FastAPI Backend
-Provides fixtures for testing with database rollback and mock services
+Provides fixtures for testing with database rollback and mock services.
+
+FIXED: Uses SQLite for tests instead of PostgreSQL — runs locally without external DB.
 """
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from fastapi.testclient import TestClient
 from config.database import Base, get_db
 from main import app
 import os
 
-# Test database URL (use separate test DB)
-TEST_DATABASE_URL = os.getenv('TEST_DATABASE_URL', 'postgresql://user:pass@localhost/test_db')
+# ── SQLite for tests (no external DB required) ──
+TEST_DATABASE_URL = os.getenv('TEST_DATABASE_URL', 'sqlite:///./test.db')
 
-# Create test engine
-test_engine = create_engine(TEST_DATABASE_URL)
+# SQLite needs check_same_thread=False for FastAPI's threaded test client
+connect_args = {"check_same_thread": False} if "sqlite" in TEST_DATABASE_URL else {}
+test_engine = create_engine(TEST_DATABASE_URL, connect_args=connect_args)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+
+
+# Enable WAL mode and foreign keys for SQLite
+@event.listens_for(test_engine, "connect")
+def set_sqlite_pragma(dbapi_conn, connection_record):
+    if "sqlite" in TEST_DATABASE_URL:
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 @pytest.fixture(scope="function")
 def db_session():
     """
-    Create a fresh database session for each test with automatic rollback
-
-    Usage in tests:
-        def test_create_contact(db_session):
-            contact = Contact(name="Test")
-            db_session.add(contact)
-            db_session.commit()
+    Create a fresh database session for each test with automatic rollback.
     """
-    # Create tables
     Base.metadata.create_all(bind=test_engine)
 
     session = TestingSessionLocal()
@@ -38,20 +43,13 @@ def db_session():
     finally:
         session.rollback()
         session.close()
-
-        # Drop all tables after test
         Base.metadata.drop_all(bind=test_engine)
 
 
 @pytest.fixture(scope="function")
 def client(db_session):
     """
-    FastAPI TestClient with overridden database dependency
-
-    Usage:
-        def test_api_endpoint(client):
-            response = client.get("/contacts")
-            assert response.status_code == 200
+    FastAPI TestClient with overridden database dependency.
     """
     def override_get_db():
         try:
@@ -70,11 +68,7 @@ def client(db_session):
 @pytest.fixture
 def auth_headers():
     """
-    Mock authentication headers for testing protected endpoints
-
-    Usage:
-        def test_protected_endpoint(client, auth_headers):
-            response = client.get("/protected", headers=auth_headers)
+    Mock authentication headers for testing protected endpoints.
     """
     import jwt
     from main import JWT_SECRET, JWT_ALGORITHM
@@ -96,16 +90,60 @@ def auth_headers():
 
 
 @pytest.fixture
-def mock_whatsapp_api(mocker):
-    """
-    Mock external WhatsApp API calls
+def sample_tenant(db_session):
+    """Create a sample tenant for testing."""
+    from models import Tenant
 
-    Usage:
-        def test_send_message(mock_whatsapp_api):
-            # WhatsApp API calls will return mock data
-            response = send_whatsapp_message(...)
-            assert response['success'] == True
-    """
+    tenant = Tenant(
+        id="test_tenant_id",
+        organization="Test Org",
+        db_user="test_db_user",
+        db_user_password="test_db_pass",
+        tier="premium",
+    )
+    db_session.add(tenant)
+    db_session.commit()
+    db_session.refresh(tenant)
+    return tenant
+
+
+@pytest.fixture
+def sample_contact(db_session, sample_tenant):
+    """Create a sample contact for testing."""
+    from contacts.models import Contact
+
+    contact = Contact(
+        name="Test Contact",
+        phone="+1234567890",
+        tenant_id=sample_tenant.id,
+    )
+    db_session.add(contact)
+    db_session.commit()
+    db_session.refresh(contact)
+    return contact
+
+
+@pytest.fixture
+def sample_broadcast_group(db_session, sample_tenant):
+    """Create a sample broadcast group for testing."""
+    from whatsapp_tenant.models import BroadcastGroups
+
+    group = BroadcastGroups(
+        id="test_group_id",
+        name="Test Group",
+        tenant_id=sample_tenant.id,
+        members=[],
+        auto_rules={},
+    )
+    db_session.add(group)
+    db_session.commit()
+    db_session.refresh(group)
+    return group
+
+
+@pytest.fixture
+def mock_whatsapp_api(mocker):
+    """Mock external WhatsApp API calls."""
     mock = mocker.patch('whatsapp_tenant.router.send_to_whatsapp')
     mock.return_value = {
         'success': True,
@@ -115,75 +153,8 @@ def mock_whatsapp_api(mocker):
     return mock
 
 
-@pytest.fixture
-def sample_contact(db_session):
-    """
-    Create a sample contact for testing
-
-    Usage:
-        def test_contact_update(sample_contact, db_session):
-            sample_contact.name = "Updated Name"
-            db_session.commit()
-    """
-    from contacts.models import Contact
-
-    contact = Contact(
-        id="test_contact_id",
-        name="Test Contact",
-        phone="+1234567890",
-        tenant_id="test_tenant_id",
-        status="active"
-    )
-    db_session.add(contact)
-    db_session.commit()
-    db_session.refresh(contact)
-
-    return contact
-
-
-@pytest.fixture
-def sample_broadcast_group(db_session):
-    """
-    Create a sample broadcast group for testing
-    """
-    from whatsapp_tenant.models import BroadcastGroups
-
-    group = BroadcastGroups(
-        id="test_group_id",
-        name="Test Group",
-        tenant_id="test_tenant_id",
-        members=[],
-        auto_rules={
-            "enabled": True,
-            "logic": "AND",
-            "conditions": [
-                {
-                    "type": "date",
-                    "field": "createdOn",
-                    "operator": "within_days",
-                    "value": 30
-                }
-            ]
-        }
-    )
-    db_session.add(group)
-    db_session.commit()
-    db_session.refresh(group)
-
-    return group
-
-
 # Pytest configuration
 def pytest_configure(config):
-    """
-    Configure pytest markers
-    """
-    config.addinivalue_line(
-        "markers", "integration: mark test as integration test"
-    )
-    config.addinivalue_line(
-        "markers", "slow: mark test as slow running"
-    )
-    config.addinivalue_line(
-        "markers", "unit: mark test as unit test"
-    )
+    config.addinivalue_line("markers", "integration: mark test as integration test")
+    config.addinivalue_line("markers", "slow: mark test as slow running")
+    config.addinivalue_line("markers", "unit: mark test as unit test")
