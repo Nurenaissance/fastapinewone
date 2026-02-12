@@ -21,13 +21,16 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies to local packages directory
+      - name: Create virtual environment and install dependencies
         run: |
-          pip install -r requirements.txt --target=".python_packages/lib/site-packages"
+          python -m venv antenv
+          source antenv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Zip deployment package
+      - name: Zip deployment package (including antenv)
         run: |
-          zip -r deploy.zip . -x ".git/*" -x "__pycache__/*" -x "*.pyc" -x ".env" -x "venv/*" -x "antenv/*"
+          zip -r deploy.zip . -x ".git/*" -x "__pycache__/*" -x "*.pyc" -x ".env" -x "venv/*"
 
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
