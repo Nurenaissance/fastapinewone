@@ -182,9 +182,12 @@ async def view_conversation(
         # Get total count with a separate optimized query
         total_conversations = db.query(func.count(Conversation.id)).filter(*filter_conditions).scalar()
         
-        # Fetch only necessary columns to reduce data transfer
+        # Fetch only necessary columns to reduce data transfer.
+        # Includes all the rich-media + reaction fields added in 2026-05 so
+        # the chat UI can render real-WhatsApp-style messages.
         conversations = (
             db.query(
+                Conversation.id,
                 Conversation.message_text,
                 Conversation.encrypted_message_text,
                 Conversation.date_time,
@@ -193,7 +196,31 @@ async def view_conversation(
                 Conversation.media_url,
                 Conversation.media_caption,
                 Conversation.media_filename,
-                Conversation.thumbnail_url
+                Conversation.thumbnail_url,
+                # Needed to synthesize a media-proxy URL when media_url is empty
+                # but media_id is present (new Node writer doesn't pre-resolve
+                # the Meta URL — it stores only the media_id).
+                Conversation.business_phone_number_id,
+                # New rich fields:
+                Conversation.wa_message_id,
+                Conversation.media_id,
+                Conversation.mime_type,
+                Conversation.quoted_message_id,
+                Conversation.reaction_target_id,
+                Conversation.reaction_emoji,
+                Conversation.reactions,
+                Conversation.is_voice,
+                Conversation.is_animated,
+                Conversation.forwarded,
+                Conversation.frequently_forwarded,
+                Conversation.status,
+                Conversation.status_error_code,
+                Conversation.status_updated_at,
+                Conversation.location_data,
+                Conversation.contacts_data,
+                Conversation.interactive_data,
+                Conversation.referred_product,
+                Conversation.order_data,
             )
             .filter(*filter_conditions)
             .order_by(Conversation.date_time.desc())
@@ -242,21 +269,79 @@ async def view_conversation(
                 text_to_append = decryption_results[original_idx]
 
             conversation_data = {
+                "id": conv.id,
                 "text": text_to_append,
                 "sender": conv.sender,
                 "time": conv.date_time,
-                "message_type": conv.message_type or "text"
+                # 'type' is the canonical key the chat UI switches on
+                "type": conv.message_type or "text",
+                # Keep 'message_type' too for any legacy consumers
+                "message_type": conv.message_type or "text",
             }
 
-            # Add media fields if present
-            if conv.media_url:
-                conversation_data["media_url"] = conv.media_url
+            # Legacy media fields. Fall back to the Node media proxy URL when
+            # the writer left media_url empty but stored a media_id — keeps the
+            # chat UI's existing download/play button working for new-format
+            # voice/audio/image rows.
+            effective_media_url = conv.media_url
+            if not effective_media_url and conv.media_id:
+                _bpid_for_url = conv.business_phone_number_id or bpid or ""
+                effective_media_url = (
+                    f"https://webhook.nuren.ai/media/{conv.media_id}?bpid={_bpid_for_url}"
+                )
+            if effective_media_url:
+                conversation_data["media_url"] = effective_media_url
             if conv.media_caption:
                 conversation_data["media_caption"] = conv.media_caption
+                # also alias as 'caption' for new UI
+                conversation_data["caption"] = conv.media_caption
             if conv.media_filename:
                 conversation_data["media_filename"] = conv.media_filename
+                conversation_data["filename"] = conv.media_filename
             if conv.thumbnail_url:
                 conversation_data["thumbnail_url"] = conv.thumbnail_url
+
+            # Rich WhatsApp metadata — emit only when populated to keep payloads small
+            if conv.wa_message_id:
+                conversation_data["wa_message_id"] = conv.wa_message_id
+            if conv.media_id:
+                conversation_data["media_id"] = conv.media_id
+            if conv.mime_type:
+                conversation_data["mime_type"] = conv.mime_type
+            if conv.quoted_message_id:
+                conversation_data["quoted_message_id"] = conv.quoted_message_id
+            if conv.reaction_target_id:
+                conversation_data["reaction_target_id"] = conv.reaction_target_id
+            if conv.reaction_emoji:
+                conversation_data["reaction_emoji"] = conv.reaction_emoji
+            if conv.reactions:
+                # JSON column can be None or [] — only emit if there's at least one
+                if isinstance(conv.reactions, list) and conv.reactions:
+                    conversation_data["reactions"] = conv.reactions
+            if conv.is_voice:
+                conversation_data["is_voice"] = True
+            if conv.is_animated:
+                conversation_data["is_animated"] = True
+            if conv.forwarded:
+                conversation_data["forwarded"] = True
+            if conv.frequently_forwarded:
+                conversation_data["frequently_forwarded"] = True
+            if conv.status:
+                conversation_data["status"] = conv.status
+            if conv.status_error_code:
+                conversation_data["status_error_code"] = conv.status_error_code
+            if conv.status_updated_at:
+                conversation_data["status_updated_at"] = conv.status_updated_at
+            if conv.location_data:
+                conversation_data["location"] = conv.location_data
+            if conv.contacts_data:
+                conversation_data["contacts"] = conv.contacts_data
+            if conv.interactive_data:
+                conversation_data["interactive"] = conv.interactive_data
+            if conv.referred_product:
+                conversation_data["referred_product"] = conv.referred_product
+            if conv.order_data:
+                conversation_data["order"] = conv.order_data
 
             formatted_conversations.append(conversation_data)
 
