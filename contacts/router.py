@@ -241,7 +241,7 @@ async def delete_contacts(request: Request, db: orm.Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting contacts: {str(e)}")
 
-@router.delete("/contacts/{contact_id}/", status_code=204)
+@router.delete("/contacts/{contact_id}/")  # 200 + JSON body (204 must be bodyless; axios json rejected the mismatch)
 def delete_contact(contact_id: int, request: Request, db: orm.Session = Depends(get_db)):
     tenant_id = request.headers.get("X-Tenant-Id")
     if not tenant_id:
@@ -512,28 +512,31 @@ def calculate_contact_richness(contact: Contact) -> int:
 @router.post("/contacts/cleanup-duplicates")
 async def cleanup_duplicate_contacts(
     request: Request,
-    tenant_id: Optional[str] = None,
     dry_run: bool = False,
     db: orm.Session = Depends(get_db)
 ):
     """
-    Delete duplicate contacts across all tenants or a specific tenant.
+    Delete duplicate contacts within the caller's tenant.
     Keeps the contact with the most data (highest richness score).
 
-    Query Parameters:
-    - tenant_id: Optional. If provided, only cleanup this tenant. Otherwise, process all tenants.
-    - dry_run: If true, returns what would be deleted without actually deleting.
-
-    This is a PUBLIC endpoint for administrative cleanup operations.
+    Authentication: required (JWT or service key). Tenant is derived from auth
+    context — callers cannot specify a different tenant via query param.
     """
+    tenant_id = getattr(request.state, "tenant_id", None)
+    if not tenant_id:
+        raise HTTPException(
+            status_code=400,
+            detail="tenant_id missing from auth context; cleanup is scoped to a single tenant",
+        )
+
+    actor = getattr(request.state, "user_id", None) or getattr(request.state, "service_name", "unknown")
     try:
         start_time = datetime.now()
-        logger.info(f"Starting duplicate contact cleanup (tenant_id={tenant_id}, dry_run={dry_run})")
+        logger.info(
+            f"Duplicate contact cleanup requested by {actor} (tenant_id={tenant_id}, dry_run={dry_run})"
+        )
 
-        # Build base query
-        query = db.query(Contact)
-        if tenant_id:
-            query = query.filter(Contact.tenant_id == tenant_id)
+        query = db.query(Contact).filter(Contact.tenant_id == tenant_id)
 
         # Get all contacts
         all_contacts = query.all()
